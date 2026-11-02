@@ -73,7 +73,7 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_apis_are_private_and_page_has_only_management_actions(self):
         components = {c["name"]: c for c in self.bot.get_components()}
-        for name in ("wake_overview", "wake_save", "wake_cancel"):
+        for name in ("wake_overview", "wake_save", "wake_cancel", "wake_edit"):
             self.assertIs(components[name]["metadata"]["public"], False)
         page = json.loads((Path(__file__).parent / "webui.json").read_text(encoding="utf-8"))[
             "pages"
@@ -305,6 +305,23 @@ class ManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("私有旧意图", json.dumps(snapshot, ensure_ascii=False))
         self.assertEqual(len(snapshot["inactive"]), 1)
         self.assertEqual(self.bot._get_wakes().path.read_bytes(), before)
+
+    async def test_delete_terminal_single_keeps_other_rows_and_dispatch_record(self):
+        await self.reserve()
+        await self.due()
+        row = await self.selected()
+        it = row["singles"][0]
+        before = self.bot._get_wakes().read()
+        self.assertTrue(it["can_delete"])
+        result = await self.bot.wake_edit(
+            "single_delete", **self.identity(row), item_id=it["item_id"], version=it["version"]
+        )
+        self.assertTrue(result["success"], result)
+        expected = copy.deepcopy(before)
+        expected["slots"]["friend"]["dismissed"] = True
+        self.assertEqual(self.bot._get_wakes().read(), expected)
+        self.assertEqual((await self.selected())["singles"], [])
+        self.bot.ctx.maisaka.proactive.trigger.assert_awaited_once()
 
     async def test_corrupt_store_is_error_and_preserved_not_an_empty_success(self):
         path = self.bot._get_wakes().path

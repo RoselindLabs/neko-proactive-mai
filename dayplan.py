@@ -151,6 +151,8 @@ def get_day(data, target, session, now, zone=""):
     rows = []
     if plan:
         for row in sorted(plan["items"].values(), key=lambda r: r["due"]):
+            if row.get("dismissed"):
+                continue
             expired = row["status"] in PENDING and plan["date"] < today
             rows.append(
                 {
@@ -163,6 +165,7 @@ def get_day(data, target, session, now, zone=""):
                     "can_edit": row["status"] in PENDING
                     and row["due"] > now
                     and plan["date"] == today,
+                    "can_delete": row["status"] not in PENDING or expired,
                     "planner_requested_at": row.get("planner_requested_at"),
                     "task": row["task"],
                 }
@@ -171,7 +174,9 @@ def get_day(data, target, session, now, zone=""):
         "date": today,
         "timezone": zone,
         "items": rows,
-        "remaining": MAX_ITEMS - len(rows) if not plan or plan["date"] == today else MAX_ITEMS,
+        "remaining": MAX_ITEMS - len(plan["items"])
+        if plan and plan["date"] == today
+        else MAX_ITEMS,
         "previous": plan["previous"] if plan else [],
         "session_changed": False,
         "configured": plan is not None,

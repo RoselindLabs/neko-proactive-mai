@@ -754,6 +754,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
             if action not in (
                 "single_save",
                 "single_cancel",
+                "single_delete",
                 "repeat_set",
                 "repeat_pause",
                 "repeat_resume",
@@ -761,6 +762,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 "day_add",
                 "day_update",
                 "day_cancel",
+                "day_delete",
             ):
                 raise ValueError("invalid_action")
             if action in ("single_save", "day_add", "day_update") and when:
@@ -771,7 +773,11 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                     if action.startswith("day_") and len(when) == 5
                     else wall_instant(when, timezone or DEFAULT_ZONE)
                 )
-            if action.startswith("day_"):
+            if action in ("single_delete", "day_delete"):
+                result = await self.management_change(
+                    action, target, session, revision, item_id=item_id, version=version
+                )
+            elif action.startswith("day_"):
                 result = await self.management_change(
                     action,
                     target,

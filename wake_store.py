@@ -75,6 +75,13 @@ def valid_record(row):
         and text(row.get("task"), 160, empty=True)
         and type(row.get("shown")) is bool
         and (
+            "dismissed" not in row
+            or (
+                type(row["dismissed"]) is bool
+                and (not row["dismissed"] or row["status"] not in PENDING)
+            )
+        )
+        and (
             "last_outcome" not in row or row["last_outcome"] in ("submitted", "rejected", "unknown")
         )
         and all(number(row.get(k)) for k in ("due", "retry", "attempted"))

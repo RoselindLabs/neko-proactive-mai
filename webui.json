@@ -24,7 +24,7 @@
       "cancel": {
         "api": "wake_edit", "confirmation": "确认取消、暂停或删除所选计划？已接收任务不会撤回，未知结果不会重放。",
         "parameters": {
-          "action": {"type": "string", "required": true, "choices": ["single_cancel", "repeat_pause", "repeat_delete", "day_cancel"]},
+          "action": {"type": "string", "required": true, "choices": ["single_cancel", "single_delete", "repeat_pause", "repeat_delete", "day_cancel", "day_delete"]},
           "target": {"type": "string", "required": true, "max_length": 128},
           "session": {"type": "string", "required": true, "max_length": 128},
           "revision": {"type": "string", "required": true, "max_length": 64},

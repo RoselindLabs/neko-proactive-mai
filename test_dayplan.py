@@ -92,6 +92,107 @@ class DayplanTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, [])
         self.assertTrue(all(cap.startswith("chat.get_stream_by_") for cap, _ in self.rpc_calls))
 
+    async def test_delete_queued_batch_item_keeps_prompt_batch_guards_and_used_quota(self):
+        await self.add(300, "批次首项")
+        await self.add(300, "批次第二项")
+        self.clock_mock.return_value = NOW + 300
+        await self.bot._run_wakes()
+        before = self.data()
+        selected = await self.selected()
+        first = selected["dayplan"]["items"][0]
+        self.assertTrue(first["can_delete"])
+        result = await self.bot.wake_edit(
+            "day_delete",
+            **self.identity(selected),
+            item_id=first["item_id"],
+            version=first["version"],
+        )
+        self.assertTrue(result["success"], result)
+        expected = copy.deepcopy(before)
+        expected["dayplans"]["friend"]["items"][first["item_id"]]["dismissed"] = True
+        self.assertEqual(self.data(), expected)
+        fresh = (await self.selected())["dayplan"]
+        self.assertEqual(len(fresh["items"]), 1)
+        self.assertEqual(fresh["remaining"], 4)
+        self.bot._get_wakes().recover(NOW + 301)
+        raw_task = task(1793505900000).replace(
+            '{"source": "lonelymai"}', json.dumps(self.calls[0]["metadata"])
+        )
+        prompt = await self.bot._wake_prompt(
+            {"session_id": "session-friend", "items": [item(raw_task)]}
+        )
+        self.assertIn("批次首项", json.dumps(prompt, ensure_ascii=False))
+        self.assertIn("批次第二项", json.dumps(prompt, ensure_ascii=False))
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_delete_revoked_record_without_reauthorizing_or_revealing_old_intent(self):
+        first = await self.add(intent="撤权后不可展示的私有意图")
+        self.bot.config.target.allowed_friends = []
+        await self.bot._run_wakes()
+        snapshot = await self.bot.wake_overview()
+        self.assertNotIn("撤权后不可展示", json.dumps(snapshot, ensure_ascii=False))
+        old = snapshot["cleanup"][0]
+        self.assertEqual(old["status"], "revoked")
+        self.bot.ctx.chat.get_stream_by_user_id = AsyncMock(side_effect=AssertionError("no lookup"))
+        result = await self.bot.wake_edit(
+            "day_delete", **self.identity(old), item_id=old["item_id"], version=old["version"]
+        )
+        self.assertTrue(result["success"], result)
+        self.assertEqual((await self.bot.wake_overview())["cleanup"], [])
+        self.assertTrue(self.plan()["items"][first["item_id"]]["dismissed"])
+        self.assertEqual(self.bot.config.target.allowed_friends, [])
+        self.assertEqual(self.calls, [])
+
+    async def test_delete_rejects_pending_stale_cross_session_and_inflight_then_allows_expired(
+        self,
+    ):
+        await self.add()
+        selected = await self.selected()
+        row = selected["dayplan"]["items"][0]
+        fields = {**self.identity(selected), "item_id": row["item_id"], "version": row["version"]}
+        raw = self.bot._get_wakes().path.read_bytes()
+        for changes in ({}, {"version": "bad"}, {"session": "other"}, {"target": "other"}):
+            self.assertFalse(
+                (await self.bot.wake_edit("day_delete", **{**fields, **changes}))["success"]
+            )
+            self.assertEqual(self.bot._get_wakes().path.read_bytes(), raw)
+        self.clock_mock.return_value = NOW + 86400
+        selected = await self.selected()
+        row = selected["dayplan"]["items"][0]
+        self.assertEqual(row["status"], "expired")
+        self.assertTrue(row["can_delete"])
+        fields = {**self.identity(selected), "item_id": row["item_id"], "version": row["version"]}
+        self.bot._wake_inflight = "friend"
+        self.assertFalse((await self.bot.wake_edit("day_delete", **fields))["success"])
+        self.assertEqual(self.bot._get_wakes().path.read_bytes(), raw)
+        self.bot._wake_inflight = ""
+        self.bot.config.scheduler.enabled = False
+        self.assertTrue((await self.bot.wake_edit("day_delete", **fields))["success"])
+        self.assertEqual((await self.selected())["dayplan"]["items"], [])
+        self.assertFalse((await self.bot.wake_edit("day_delete", **fields))["success"])
+
+    async def test_delete_unknown_keeps_uncertainty_and_no_model_delete_action(self):
+        await self.add()
+        self.result = None
+        self.clock_mock.return_value = NOW + 300
+        await self.bot._run_wakes()
+        selected = await self.selected()
+        row = selected["dayplan"]["items"][0]
+        before = self.data()
+        result = await self.bot.wake_edit(
+            "day_delete", **self.identity(selected), item_id=row["item_id"], version=row["version"]
+        )
+        self.assertTrue(result["success"], result)
+        after = self.data()
+        self.assertEqual(after["last_dispatch"], before["last_dispatch"])
+        self.assertEqual(self.plan()["items"][row["item_id"]]["status"], "unknown")
+        self.assertFalse(
+            (await self.tool("delete", item_id=row["item_id"], version=row["version"]))["success"]
+        )
+        self.bot._get_wakes().recover(NOW + 360)
+        await self.bot._run_wakes()
+        self.assertEqual(len(self.calls), 1)
+
     async def test_future_only_update_cancel_cas_and_used_slots_cannot_be_refilled(self):
         first = await self.add()
         response = await self.tool(

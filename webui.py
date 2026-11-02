@@ -59,6 +59,8 @@ ERRORS = {
     "day_full": "今天最多6项，已取消和已尝试项仍计入额度",
     "day_item_not_found": "没有找到当前私聊的这项日程",
     "day_future_only": "只能修改或删除尚未到点、从未提交的今天事项",
+    "record_not_found": "这条记录已改变或已删除，请刷新列表",
+    "record_future_only": "待执行事项请先取消，只有已结束的记录可以删除",
     "wake_submission_inflight": "该私聊正在提交Host，稍后刷新核对；不会自动重试",
     "invalid_repeat": "选择固定间隔或每天，并填写联系依据",
     "invalid_repeat_interval": "间隔须为1～10080分钟",
@@ -134,6 +136,44 @@ def next_activity(now, start, end):
 
 
 class WakeManagement:
+    def _delete_record_locked(self, action, target, session, revision, item_id, version):
+        """Admin-only list dismissal; keep dispatch, batch identity and daily usage intact."""
+        from .dayplan import day_key, item_version
+
+        if not self._wake_ready:
+            raise ValueError("wake_disabled")
+        if self._wake_inflight == target:
+            raise ValueError("wake_submission_inflight")
+        data = self._get_wakes().read()
+        plan = data.get("dayplans", {}).get(target)
+        if revision != wake_revision(
+            target,
+            session,
+            single_revision(data, target),
+            data.get("repeats", {}).get(target),
+            plan,
+        ):
+            raise ValueError("stale_wake_revision")
+        rows = (
+            [*plan["items"].values(), *plan["retained"]]
+            if action == "day_delete" and plan
+            else singles(data, target)
+            if action == "single_delete"
+            else []
+        )
+        row = next((r for r in rows if r["id"] == item_id and r["session"] == session), None)
+        if not row or row.get("dismissed"):
+            raise ValueError("record_not_found")
+        if not text(version, 64) or version != item_version(row):
+            raise ValueError("stale_wake_revision")
+        expired = action == "day_delete" and plan["date"] < day_key(time.time(), plan["timezone"])
+        if row["status"] in PENDING:
+            if not expired:
+                raise ValueError("record_future_only")
+            row.update(status="expired", block="day_ended")
+        row["dismissed"] = True
+        self._get_wakes().write(data)
+
     def _note_check(self, state, reason, **extra):
         key = (state.is_group, state.target_id)
         previous = self._observations.get(key, {})
@@ -212,6 +252,12 @@ class WakeManagement:
                 raise ValueError("invalid_management_request")
             async with asyncio.timeout(7):
                 async with self._wake_lock:
+                    if action in ("single_delete", "day_delete"):
+                        self._delete_record_locked(
+                            action, target, session, revision, item_id, version
+                        )
+                        self._management_operation = "记录已删除；已入队任务不撤回"
+                        return {"success": True, "message": self._management_operation}
                     if target not in {str(v).strip() for v in self.config.target.allowed_friends}:
                         raise ValueError("private_chat_not_authorized")
                     epoch = self._management_epoch
@@ -281,7 +327,7 @@ class WakeManagement:
                 ]
                 targets = list(dict.fromkeys((g, t) for g, t in targets if text(t, 128)))
                 truncated = len(targets) > 128
-                base, reservations, current_private = [], [], set()
+                base, reservations, current_private, current_sessions = [], [], set(), {}
                 for group, target in targets[:128]:
                     stream = await self._management_stream(target, group)
                     if epoch != self._management_epoch:
@@ -306,6 +352,7 @@ class WakeManagement:
                     day = None if group else data.get("dayplans", {}).get(target)
                     if not group and stream:
                         current_private.add(target)
+                        current_sessions[target] = stream["session"]
                     observation = self._observations.get((group, target), {})
                     if not stream or observation.get("session") != stream["session"]:
                         observation = {}
@@ -501,9 +548,10 @@ class WakeManagement:
                                     "version": item_version(r),
                                     "can_edit": r["status"] in PENDING and r["due"] > now,
                                     "can_cancel": r["status"] in PENDING,
+                                    "can_delete": r["status"] not in PENDING,
                                 }
                                 for r in sorted(singles(data, target), key=lambda r: r["due"])
-                                if r["session"] == stream["session"]
+                                if r["session"] == stream["session"] and not r.get("dismissed")
                             ],
                             "at": active_row["at"] if active_row else "—",
                             "zone": active_row["timezone"] if active_row else "—",
@@ -532,6 +580,7 @@ class WakeManagement:
                             if self._target_guard(data, target) > now
                             else "已满足60秒安全间距",
                             "cannot_save": not can_save,
+                            "cannot_delete": not self._wake_ready or self._wake_inflight == target,
                             "cannot_cancel": not self._wake_ready
                             or not active_row
                             or active_row["status"] not in PENDING,
@@ -603,10 +652,53 @@ class WakeManagement:
                     and target not in data["slots"]
                     and target not in data.get("repeats", {})
                 )
+                cleanup = []
+                for target in sorted(
+                    set(data["slots"]) | set(data["appointments"]) | set(data["dayplans"])
+                ):
+                    day = data["dayplans"].get(target)
+                    records = [("single_delete", r, False) for r in singles(data, target)]
+                    if day:
+                        from .dayplan import day_key
+
+                        ended = day["date"] < day_key(now, day["timezone"])
+                        records.extend(("day_delete", r, ended) for r in day["items"].values())
+                        records.extend(("day_delete", r, True) for r in day["retained"])
+                    for action, record, ended in records:
+                        retained = day and record in day["retained"]
+                        if (
+                            record.get("dismissed")
+                            or (record["status"] in PENDING and not ended)
+                            or (current_sessions.get(target) == record["session"] and not retained)
+                        ):
+                            continue
+                        cleanup.append(
+                            {
+                                "target": target,
+                                "session": record["session"],
+                                "revision": wake_revision(
+                                    target,
+                                    record["session"],
+                                    single_revision(data, target),
+                                    data["repeats"].get(target),
+                                    day,
+                                ),
+                                "action": action,
+                                "item_id": record["id"],
+                                "version": item_version(record),
+                                "at": record["at"],
+                                "timezone": record["timezone"],
+                                "status": "expired"
+                                if record["status"] in PENDING
+                                else record["status"],
+                                "can_delete": self._wake_ready and self._wake_inflight != target,
+                            }
+                        )
                 return {
                     "base": base,
                     "reservations": reservations,
                     "inactive": hidden,
+                    "cleanup": cleanup,
                     "state": "自动调度运行中" if enabled else "自动调度已关闭或未运行",
                     "deadline": local_time(self._next_regular_at) if enabled else "—",
                     "pass": local_time(self._next_pass_at) if enabled else "—",
