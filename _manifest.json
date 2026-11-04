@@ -9,9 +9,9 @@
   },
   "license": "AGPL-3.0-or-later",
   "urls": {
-    "repository": "https://github.com/znzsofficial/neko-proactive-mai",
-    "homepage": "https://github.com/znzsofficial/neko-proactive-mai",
-    "issues": "https://github.com/znzsofficial/neko-proactive-mai/issues"
+    "repository": "https://github.com/RoselindLabs/neko-proactive-mai",
+    "homepage": "https://github.com/RoselindLabs/neko-proactive-mai",
+    "issues": "https://github.com/RoselindLabs/neko-proactive-mai/issues"
   },
   "host_application": {
     "min_version": "1.0.0",

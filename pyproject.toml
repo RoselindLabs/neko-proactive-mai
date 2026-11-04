@@ -15,8 +15,8 @@ dependencies = ["maibot-plugin-sdk>=2.12.0,<3"]
 test = ["ruff==0.15.11"]
 
 [project.urls]
-Repository = "https://github.com/znzsofficial/neko-proactive-mai"
-Issues = "https://github.com/znzsofficial/neko-proactive-mai/issues"
+Repository = "https://github.com/RoselindLabs/neko-proactive-mai"
+Issues = "https://github.com/RoselindLabs/neko-proactive-mai/issues"
 
 [tool.setuptools]
 # This is a MaiBot plugin flat layout, not a distributable Python package.
