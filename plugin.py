@@ -89,14 +89,27 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
 
     async def on_load(self) -> None:
         self._get_wakes().recover(time.time())
+        # Runner may reactivate this same unloaded instance on a failed reload.
+        # Its closed bridges have drained; reopen lazily from the durable ledger.
+        self._life = None
+        self._bilibili = None
         self._wake_ready = True
         await self._sync_scheduler()
 
     async def on_unload(self) -> None:
+        from .life_bridge import finish_owned
+
         self._management_epoch = getattr(self, "_management_epoch", 0) + 1
         self._wake_ready = False
-        async with self._lifecycle_lock:
-            await self._stop_scheduler()
+
+        async def cleanup():
+            async with self._lifecycle_lock:
+                await self._stop_scheduler()
+                for bridge in (self._life, getattr(self, "_bilibili", None)):
+                    if bridge is not None:
+                        await bridge.close()
+
+        await finish_owned(cleanup())
         self.ctx.logger.info("Neko Proactive Mai 已卸载")
 
     async def on_config_update(self, *args, **kwargs):
@@ -152,6 +165,10 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 state.last_proactive_time = previous.get(key, 0.0)
                 resolved[key] = state
             else:
+                if (True, target_id) in self._states:
+                    state = ChatStreamState("", target_id, is_group=True)
+                    state.last_proactive_time = previous[(True, target_id)]
+                    resolved[(True, target_id)] = state
                 self.ctx.logger.warning(f"无法解析群聊: {target_id}")
 
         for user_qq in self.config.target.allowed_friends:
@@ -165,6 +182,10 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 state.last_proactive_time = previous.get(key, 0.0)
                 resolved[key] = state
             else:
+                if (False, target_id) in self._states:
+                    state = ChatStreamState("", target_id)
+                    state.last_proactive_time = previous[(False, target_id)]
+                    resolved[(False, target_id)] = state
                 self.ctx.logger.warning(f"无法解析私聊: {target_id}")
 
         changed = set(resolved) != set(self._states)
@@ -174,26 +195,13 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
 
     async def _resolve_session_id(self, qq: str, is_group: bool) -> Optional[str]:
         try:
-            if is_group:
-                result = await self.ctx.chat.get_stream_by_group_id(qq)
-            else:
-                result = await self.ctx.chat.get_stream_by_user_id(qq)
+            # One strict parser for scheduling, tools and management. Missing or
+            # untrusted identity is unavailable, never authority to use a cached ID.
+            stream = await self._management_stream(qq, is_group)
         except Exception as e:
             self.ctx.logger.error(f"ctx.chat 查询失败 ({qq}): {e}")
             return None
-
-        if not isinstance(result, dict):
-            self.ctx.logger.warning(f"会话查询返回了非字典 ({qq}): {type(result).__name__}")
-            return None
-        if result.get("success") is False:
-            self.ctx.logger.warning(f"会话查询失败 ({qq}): {result.get('error') or result}")
-            return None
-        stream = result.get("stream", result if "session_id" in result else None)
-        if not stream:
-            return None
-        if isinstance(stream, dict):
-            return stream.get("session_id") or stream.get("stream_id")
-        return getattr(stream, "session_id", None) or getattr(stream, "stream_id", None)
+        return stream["session"] if stream else None
 
     # ========== 调度循环 ==========
 
@@ -849,18 +857,6 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
             for target, plan in data.get("repeats", {}).items():
                 if not plan["enabled"]:
                     continue
-                state = self._states.get((False, target))
-                if (
-                    not state
-                    or state.stream_id != plan["session"]
-                    or not self._is_authorized(state, target)
-                ):
-                    plan.update(enabled=False, state="revoked")
-                    plan["current"].update(
-                        status="revoked", block="authorization_or_session_changed"
-                    )
-                    store.write(data)
-                    continue
                 if time.time() >= expires(plan):
                     advance(plan, time.time(), "expired", "repeat_window_missed")
                     store.write(data)
@@ -873,10 +869,8 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 if row["status"] not in PENDING:
                     continue
                 state = self._states.get((False, target))
-                if (
-                    not state
-                    or row["session"] != state.stream_id
-                    or not self._is_authorized(state, target)
+                if not self._is_authorized(ChatStreamState(row["session"], target), target) or (
+                    state and state.stream_id and row["session"] != state.stream_id
                 ):
                     row.update(status="revoked", block="authorization_or_session_changed")
                     if plan:
@@ -884,6 +878,14 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                     store.write(data)
                     continue
                 if row["due"] > now or row["retry"] > now:
+                    continue
+                if now - row["due"] >= 86400:
+                    row.update(status="expired", block="blocked_24h")
+                    store.write(data)
+                    continue
+                if not state or not state.stream_id:
+                    row.update(status="blocked", block="session_unavailable", retry=now + 60)
+                    store.write(data)
                     continue
                 if (plan or is_day) and any(
                     r["status"] in PENDING and r["session"] == state.stream_id
@@ -914,23 +916,23 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                     advance(plan, now, "expired", "dayplan_priority")
                     store.write(data)
                     continue
-                if now - row["due"] >= 86400:
-                    row.update(status="expired", block="blocked_24h")
-                    store.write(data)
-                    continue
                 self._note_check(state, "appointment")
                 # Query session fresh; config/lifecycle may change during Host reads.
-                if is_day:
-                    resolved_stream = await self._management_stream(target, False)
-                    resolved = resolved_stream["session"] if resolved_stream else None
-                else:
-                    resolved = await self._resolve_session_id(target, False)
+                resolved = await self._resolve_session_id(target, False)
                 if not self._wake_ready or not self._automatic_enabled():
                     return
-                if not self._is_authorized(state, target) or resolved != row["session"]:
+                if not self._is_authorized(state, target) or (
+                    resolved is not None and resolved != row["session"]
+                ):
                     row.update(status="revoked", block="authorization_or_session_changed")
                     if plan:
                         plan.update(enabled=False, state="revoked")
+                    store.write(data)
+                    continue
+                if resolved is None:
+                    row.update(
+                        status="blocked", block="session_unavailable", retry=time.time() + 60
+                    )
                     store.write(data)
                     continue
                 # All rule reads occur after async Host lookups, using the latest
@@ -1107,7 +1109,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 self._next_pass_at = None
                 self._wake_event.clear()
                 await self._init_target_streams()
-                if not self._states:
+                if not any(state.stream_id for state in self._states.values()):
                     await self._run_wakes()
                     self._scheduler_phase = "unresolved"
                     self._next_pass_at = time.time() + 15
@@ -1118,6 +1120,8 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 regular = time.monotonic() >= next_regular
                 self._scheduler_phase = "checking"
                 for state in list(self._states.values()) if regular else []:
+                    if not state.stream_id:
+                        continue
                     target_id = state.target_id
                     allowed = (
                         self.config.target.allowed_groups
@@ -1263,8 +1267,9 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 session_id,
                 start_time=str(start_ts),
                 end_time=str(end_ts),
-                limit=5,
+                limit=1,
                 limit_mode="latest",
+                filter_mai=True,
             )
             if not isinstance(raw, list):
                 return None
@@ -1297,7 +1302,12 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
         modified, removed = filter_request(kwargs)
         items = modified.get("items")
         offers = []
-        if isinstance(items, list) and self.config.plugin.enabled and self.config.life.enabled:
+        if (
+            isinstance(items, list)
+            and self._wake_ready
+            and self.config.plugin.enabled
+            and self.config.life.enabled
+        ):
             try:
                 from .life_bridge import LifeBridge
 
@@ -1337,7 +1347,12 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
         if offers:
             modified["items"] = inject_offers(items, offers)
         bili_offers = []
-        if isinstance(items, list) and self.config.plugin.enabled and self.config.bilibili.enabled:
+        if (
+            isinstance(items, list)
+            and self._wake_ready
+            and self.config.plugin.enabled
+            and self.config.bilibili.enabled
+        ):
             try:
                 from .bilibili_bridge import BilibiliBridge
                 from .prompt_visibility import inject_bilibili_offers
@@ -1519,6 +1534,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
         )
         return (
             self.config.plugin.enabled
+            and bool(state.stream_id)
             and state.target_id == target_id
             and target_id in {str(value).strip() for value in allowed}
         )
@@ -1528,7 +1544,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
 
         群聊和私聊各选自己的意图，空白时使用各自默认。
         """
-        if not self._is_authorized(state, target_id):
+        if not self._wake_ready or not self._is_authorized(state, target_id):
             self._skip(target_id, "插件已禁用或目标已撤权")
             return False
         candidate = None
@@ -1577,7 +1593,12 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
         try:
             # Life I/O yields to config updates. Recheck immediately before Host I/O;
             # an already dispatched Host request cannot be recalled by this plugin.
-            if not self._is_authorized(state, target_id):
+            resolved = await self._resolve_session_id(target_id, state.is_group)
+            if (
+                not self._wake_ready
+                or not self._is_authorized(state, target_id)
+                or resolved != state.stream_id
+            ):
                 if candidate:
                     await candidate_bridge.update(candidate["receipt_id"], "released")
                 return False
@@ -1639,7 +1660,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
 
     @HookHandler("send_service.after_send", name="lonelymai_life_receipt", mode=HookMode.OBSERVE)
     async def life_after_send(self, **kwargs):
-        if not self.config.life.enabled:
+        if not self._wake_ready or not self.config.life.enabled:
             return
         message = kwargs.get("message")
         if not isinstance(message, dict):

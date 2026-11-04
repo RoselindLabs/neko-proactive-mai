@@ -1,14 +1,18 @@
 import json
+import asyncio
+import threading
+import importlib
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from maibot_sdk.context import PluginContext
 import test_intent as intents
 from prompt_visibility import pending_offers, filter_request, inject_bilibili_offers, EPHEMERAL
 import test_prompt_visibility as visibility
+import test_wakes as wakes
 
 
 class BilibiliIntentTests(unittest.IsolatedAsyncioTestCase):
@@ -111,4 +115,157 @@ class BilibiliIntentTests(unittest.IsolatedAsyncioTestCase):
             args = calls[0]["args"]
             self.assertEqual(args["api_name"], "local.bilibili-autopilot.discovery_v1")
             self.assertEqual(args["args"]["packet"]["audience"], "local.bilibili-autopilot")
-            self.assertEqual(bridge.path.name, "bilibili-outbox.json")
+        self.assertEqual(bridge.path.name, "bilibili-outbox.json")
+
+
+class BilibiliIOTests(unittest.IsolatedAsyncioTestCase):
+    setUp = wakes.WakeTests.setUp
+
+    def bridge(self):
+        bridge = importlib.import_module("wake_test.bilibili_bridge").BilibiliBridge(self.bot.ctx)
+        bridge.call = AsyncMock(
+            side_effect=[
+                {
+                    "success": True,
+                    "candidate": {"receipt_id": char * 32, "summary": "synthetic", "protocol": 2},
+                }
+                for char in ("a", "b")
+            ]
+        )
+        return bridge
+
+    def gated_write(self, bridge, *, error=False):
+        entered, completed = asyncio.Event(), asyncio.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        original = bridge._write
+        loop = asyncio.get_running_loop()
+
+        def write(rows):
+            loop.call_soon_threadsafe(entered.set)
+            try:
+                if not release.wait(10):
+                    raise TimeoutError("synthetic write gate was not released")
+                if error:
+                    raise OSError("synthetic worker failure")
+                return original(rows)
+            finally:
+                loop.call_soon_threadsafe(completed.set)
+
+        bridge._write = write
+        return entered, release, completed
+
+    async def test_repeated_cancel_keeps_lock_until_thread_finishes_and_next_claim_keeps_both_rows(
+        self,
+    ):
+        bridge = self.bridge()
+        entered, release, completed = self.gated_write(bridge)
+        first = asyncio.create_task(bridge.claim("group"))
+        second = None
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            first.cancel()
+            await asyncio.sleep(0)
+            first.cancel()
+            second = asyncio.create_task(bridge.claim("group"))
+            await asyncio.sleep(0)
+            self.assertFalse(first.done())
+            self.assertTrue(bridge.lock.locked())
+            self.assertEqual(bridge.call.await_count, 1)
+            self.assertFalse(second.done())
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await first
+            await second
+            self.assertTrue(completed.is_set())
+            self.assertEqual(set(bridge._read()), {"a" * 32, "b" * 32})
+        finally:
+            release.set()
+            await asyncio.gather(
+                *(task for task in (first, second) if task), return_exceptions=True
+            )
+
+    async def test_unload_drains_scheduler_and_non_scheduler_writes_even_if_cancelled_and_worker_fails(
+        self,
+    ):
+        for owned_by_scheduler, error in (
+            (True, False),
+            (False, False),
+            (True, True),
+            (False, True),
+        ):
+            with self.subTest(scheduler=owned_by_scheduler, worker_error=error):
+                with tempfile.TemporaryDirectory() as directory:
+                    self.bot.ctx.paths.data_dir = directory
+                    self.bot._wake_ready = True
+                    bridge = self.bot._bilibili = self.bridge()
+                    entered, release, completed = self.gated_write(bridge, error=error)
+                    first = asyncio.create_task(bridge.claim("group"))
+                    unloading = None
+                    self.bot._scheduler_task = first if owned_by_scheduler else None
+                    try:
+                        await asyncio.wait_for(entered.wait(), 5)
+                        unloading = asyncio.create_task(self.bot.on_unload())
+                        await asyncio.sleep(0)
+                        # Cancel both the owner and the waiting unloader repeatedly.
+                        first.cancel()
+                        await asyncio.sleep(0)
+                        first.cancel()
+                        unloading.cancel()
+                        await asyncio.sleep(0)
+                        unloading.cancel()
+                        await asyncio.sleep(0)
+                        self.assertFalse(unloading.done())
+                        self.assertTrue(bridge.lock.locked())
+                        self.assertFalse(completed.is_set())
+                        release.set()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await unloading
+                        with self.assertRaises(asyncio.CancelledError):
+                            await first
+                        self.assertTrue(completed.is_set())
+                        self.assertTrue(bridge.closed)
+                        with self.assertRaisesRegex(ValueError, "bridge_closed"):
+                            await bridge.claim("group")
+                        new = self.bridge()
+                        new.call.side_effect = None
+                        new.call.return_value = {
+                            "success": True,
+                            "candidate": {
+                                "receipt_id": "b" * 32,
+                                "summary": "synthetic",
+                                "protocol": 2,
+                            },
+                        }
+                        await new.claim("group")
+                        self.assertEqual(
+                            set(new._read()), {"b" * 32} if error else {"a" * 32, "b" * 32}
+                        )
+                    finally:
+                        release.set()
+                        await asyncio.gather(
+                            *(task for task in (first, unloading) if task), return_exceptions=True
+                        )
+
+    async def test_worker_failure_without_cancellation_is_not_swallowed(self):
+        bridge = self.bridge()
+        with patch.object(bridge, "_write", side_effect=OSError("synthetic")):
+            with self.assertRaisesRegex(OSError, "synthetic"):
+                await bridge.claim("group")
+        self.assertFalse(bridge.lock.locked())
+        self.assertFalse(bridge.path.exists())
+
+    async def test_same_instance_reactivation_reopens_drained_bridge_from_ledger(self):
+        bridge = self.bot._bilibili = self.bridge()
+        await bridge.claim("group")
+        before = bridge.path.read_bytes()
+        await self.bot.on_unload()
+        self.assertTrue(bridge.closed)
+        self.bot.config.scheduler.enabled = False
+        await self.bot.on_load()
+        self.assertIsNone(self.bot._bilibili)
+        self.assertTrue(self.bot._wake_ready)
+        fresh = self.bot._bilibili = self.bridge()
+        self.assertFalse(fresh.closed)
+        self.assertEqual(fresh.path.read_bytes(), before)
+        await self.bot.on_unload()

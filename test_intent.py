@@ -6,6 +6,7 @@ import types
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
+from test_wakes import host_stream
 
 
 @unittest.skipUnless(importlib.util.find_spec("maibot_sdk"), "requires MaiBot SDK")
@@ -35,6 +36,16 @@ class LifeIntentTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.bot = Bot()
+        self.bot._wake_ready = True
+        self.bot._bot_qq = "bot"
+        self.bot.ctx.chat = types.SimpleNamespace(
+            get_stream_by_group_id=AsyncMock(
+                side_effect=lambda target: host_stream(target, True, session="group-chat")
+            ),
+            get_stream_by_user_id=AsyncMock(
+                side_effect=lambda target: host_stream(target, False, session="chat")
+            ),
+        )
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.bot.ctx.paths = types.SimpleNamespace(data_dir=directory.name)
@@ -90,6 +101,9 @@ class LifeIntentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kw["metadata"]["chat_kind"], "group")
 
     async def test_group_and_private_custom_prompts_select_independently(self):
+        self.bot.ctx.chat.get_stream_by_group_id.side_effect = lambda target: host_stream(
+            target, True, session="chat"
+        )
         self.bot.config.intent.group_text = "群聊自定义"
         self.bot.config.intent.private_text = "私聊自定义"
         for group, expected in [(True, "群聊自定义"), (False, "私聊自定义")]:
@@ -146,9 +160,11 @@ class LifeIntentTests(unittest.IsolatedAsyncioTestCase):
         self.bot.config.target.allowed_groups = ["42"]
         self.bot.config.target.allowed_friends = ["42"]
         self.bot.ctx.chat = types.SimpleNamespace(
-            get_stream_by_group_id=AsyncMock(return_value={"stream": {"session_id": "group-chat"}}),
+            get_stream_by_group_id=AsyncMock(
+                return_value={"stream": host_stream("42", True, session="group-chat")}
+            ),
             get_stream_by_user_id=AsyncMock(
-                return_value={"stream": {"session_id": "private-chat"}}
+                return_value={"stream": host_stream("42", False, session="private-chat")}
             ),
         )
         await self.bot._init_target_streams()
@@ -164,6 +180,9 @@ class LifeIntentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot._states[(False, "42")].last_proactive_time, 456)
 
     async def test_manual_command_uses_matched_stream_kind(self):
+        self.bot.ctx.chat.get_stream_by_user_id.side_effect = lambda target: host_stream(
+            target, False, session="private-chat"
+        )
         self.bot.config.intent.group_text = "群聊手动"
         self.bot.config.intent.private_text = "私聊手动"
         self.bot._states = {
@@ -239,7 +258,17 @@ class LifeIntentTests(unittest.IsolatedAsyncioTestCase):
             await self.bot._check_and_trigger(self.state, "target")
         self.assertEqual(self.state.last_proactive_time, 0)
         self.bot.ctx.maisaka.proactive.trigger.return_value = {"success": True}
-        with patch.object(self.mod.random, "random", return_value=0):
+        # Rejection keeps the durable 60s fence even though successful cooldown
+        # stays empty. The old fixture bypassed it by never completing on_load.
+        from datetime import datetime, timedelta
+
+        later = datetime.now() + timedelta(seconds=61)
+        with (
+            patch.object(self.mod.random, "random", return_value=0),
+            patch.object(self.mod, "datetime") as clock,
+            patch.object(self.mod.time, "time", return_value=later.timestamp()),
+        ):
+            clock.now.return_value = later
             await self.bot._check_and_trigger(self.state, "target")
         self.assertGreater(self.state.last_proactive_time, 0)
 

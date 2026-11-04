@@ -9,26 +9,7 @@ from maibot_sdk import PluginContext
 from maibot_sdk.context import PluginPaths
 
 import test_wakes as fixtures
-from test_wakes import NOW, iso
-
-
-def host_stream(target, group):
-    """Synthetic payload in pinned Host _serialize_stream's exact field shape."""
-    session = "session-" + target
-    return {
-        "session_id": session,
-        "stream_id": session,
-        "platform": "qq",
-        "user_id": "" if group else target,
-        "user_nickname": "" if group else "合成好友",
-        "user_cardname": "",
-        "group_id": target if group else "",
-        "group_name": "合成群" + target if group else "",
-        "account_id": "bot",
-        "scope": "group" if group else "private",
-        "is_group_session": group,
-        "chat_type": "group" if group else "private",
-    }
+from test_wakes import NOW, iso, host_stream
 
 
 class ChatSDKTests(unittest.IsolatedAsyncioTestCase):

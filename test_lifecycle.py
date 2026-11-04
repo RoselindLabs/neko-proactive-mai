@@ -29,6 +29,7 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(directory.cleanup)
         bot.ctx.paths = types.SimpleNamespace(data_dir=directory.name)
         bot._wakes = None
+        bot._life = None
         bot._wake_ready = False
         bot.config.plugin.enabled = False
         bot._scheduler_task = None

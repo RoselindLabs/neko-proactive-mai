@@ -15,6 +15,28 @@ CLIENT_ID = "neko.proactive"
 LEGACY_CLIENT_ID = "attention-seeker-mai"
 
 
+async def finish_owned(job):
+    """Drain owned work before releasing its lock, even after repeated cancellation."""
+    task = asyncio.ensure_future(job)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                break
+        if not task.cancelled():
+            task.exception()  # Consume worker errors without replacing caller cancellation.
+        raise
+
+
+async def io(function, *args):
+    return await finish_owned(asyncio.to_thread(function, *args))
+
+
 class LifeBridge:
     terminal_statuses = {"sent", "released", "declined"}
     accepted_statuses = {"sent", "declined", "released", "unknown", "adopted", "submitted"}
@@ -27,6 +49,20 @@ class LifeBridge:
         self.provider, self.prefix, self.api_name = provider, prefix, api_name
         self.path = self.directory / (prefix + "-outbox.json")
         self.lock = asyncio.Lock()
+        self.closed = False
+
+    async def close(self):
+        self.closed = True
+
+        async def drain():
+            async with self.lock:
+                pass
+
+        await finish_owned(drain())
+
+    def _ensure_open(self):
+        if self.closed:
+            raise ValueError("bridge_closed")
 
     def _keys(self):
         p = self.directory / (self.prefix + "-client.json")
@@ -68,7 +104,7 @@ class LifeBridge:
                 os.unlink(name)
 
     async def call(self, operation, body):
-        key = await asyncio.to_thread(self._keys)
+        key = await io(self._keys)
         packet = {
             "v": 1,
             "client": CLIENT_ID,
@@ -100,7 +136,8 @@ class LifeBridge:
 
     async def claim(self, session):
         async with self.lock:
-            rows = await asyncio.to_thread(self._read)
+            self._ensure_open()
+            rows = await io(self._read)
             # Keep all uncertain rows. Refuse new claims rather than evict attribution.
             rows = {
                 k: v
@@ -136,23 +173,24 @@ class LifeBridge:
                 "acknowledged": False,
                 "protocol": candidate.get("protocol", 1),
             }
-            await asyncio.to_thread(self._write, rows)
+            await io(self._write, rows)
             return candidate
 
     async def update(self, receipt, status, task=""):
         async with self.lock:
-            rows = await asyncio.to_thread(self._read)
+            self._ensure_open()
+            rows = await io(self._read)
             if receipt not in rows:
                 return
             row = rows[receipt]
             if row["status"] in self.terminal_statuses:
                 return
             row.update(status=status, host_task=task or row["host_task"], acknowledged=False)
-            await asyncio.to_thread(self._write, rows)
+            await io(self._write, rows)
             if status in {"submitted", "unknown", "released", "sent"}:
                 await self._flush_row(row)
                 rows[receipt]["acknowledged"] = True
-                await asyncio.to_thread(self._write, rows)
+                await io(self._write, rows)
 
     async def _flush_row(self, row):
         # Ensure a sent receipt can be recognized even after a lost submit ack.
@@ -169,7 +207,8 @@ class LifeBridge:
 
     async def flush(self):
         async with self.lock:
-            rows = await asyncio.to_thread(self._read)
+            self._ensure_open()
+            rows = await io(self._read)
             for row in [r for r in rows.values() if not r.get("acknowledged")][:2]:
                 if row["status"] == "prepared":
                     # Crash before/after trigger cannot be distinguished safely.
@@ -200,7 +239,7 @@ class LifeBridge:
                 except Exception:
                     row["checked"] = time.time()
                     break
-            await asyncio.to_thread(self._write, rows)
+            await io(self._write, rows)
 
     async def after_send(self, session, task, sent):
         if (
@@ -210,7 +249,8 @@ class LifeBridge:
         ):
             return
         async with self.lock:
-            rows = await asyncio.to_thread(self._read)
+            self._ensure_open()
+            rows = await io(self._read)
             matching = [
                 r
                 for r in rows.values()

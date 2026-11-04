@@ -28,6 +28,7 @@ REASONS = {
     "restart_missed": "重载时已错过，不补执行",
     "blocked_24h": "已等待24小时，停止执行",
     "authorization_or_session_changed": "名单或真实会话已改变",
+    "session_unavailable": "真实会话或账号暂不可核实，稍后重查；未提交或撤销计划",
     "probability": "本轮概率未命中",
     "checking": "正在检查",
     "eligible": "本轮条件通过",

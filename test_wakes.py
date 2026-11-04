@@ -28,6 +28,25 @@ def iso(stamp):
     return datetime.fromtimestamp(stamp, timezone.utc).isoformat()
 
 
+def host_stream(target, group, *, session=None):
+    """Complete pinned Host identity; success fixtures never omit ownership fields."""
+    sid = session or "session-" + target
+    return {
+        "session_id": sid,
+        "stream_id": sid,
+        "platform": "qq",
+        "user_id": "" if group else target,
+        "user_nickname": "" if group else "合成好友",
+        "user_cardname": "",
+        "group_id": target if group else "",
+        "group_name": "合成群" + target if group else "",
+        "account_id": "bot",
+        "scope": "group" if group else "private",
+        "is_group_session": group,
+        "chat_type": "group" if group else "private",
+    }
+
+
 class WakeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -46,10 +65,10 @@ class WakeTests(unittest.IsolatedAsyncioTestCase):
             config=types.SimpleNamespace(get=AsyncMock(return_value="bot")),
             chat=types.SimpleNamespace(
                 get_stream_by_user_id=AsyncMock(
-                    side_effect=lambda user: {"stream": {"session_id": "session-" + user}}
+                    side_effect=lambda user: {"stream": host_stream(user, False)}
                 ),
                 get_stream_by_group_id=AsyncMock(
-                    return_value={"stream": {"session_id": "session-group"}}
+                    side_effect=lambda group: {"stream": host_stream(group, True)}
                 ),
             ),
             maisaka=types.SimpleNamespace(
@@ -327,15 +346,15 @@ class WakeTests(unittest.IsolatedAsyncioTestCase):
             self.bot.config.plugin.enabled = True
             self.bot.config.scheduler.enabled = True
             self.bot._wake_ready = True
-            self.bot.ctx.chat.get_stream_by_user_id.side_effect = lambda _: {
-                "stream": {"session_id": "session-friend"}
+            self.bot.ctx.chat.get_stream_by_user_id.side_effect = lambda target: {
+                "stream": host_stream(target, False)
             }
             await self.reserve()
             if mode == "whitelist":
                 self.bot.config.target.allowed_friends = []
             elif mode == "session":
-                self.bot.ctx.chat.get_stream_by_user_id.side_effect = lambda _: {
-                    "stream": {"session_id": "different"}
+                self.bot.ctx.chat.get_stream_by_user_id.side_effect = lambda target: {
+                    "stream": host_stream(target, False, session="different")
                 }
             elif mode == "disabled":
                 self.bot.config.plugin.enabled = False
@@ -351,7 +370,7 @@ class WakeTests(unittest.IsolatedAsyncioTestCase):
 
         async def revoke(_):
             self.bot.config.target.allowed_friends = []
-            return {"stream": {"session_id": "session-friend"}}
+            return {"stream": host_stream("friend", False)}
 
         self.bot.ctx.chat.get_stream_by_user_id.side_effect = revoke
         await self.due()
@@ -497,7 +516,7 @@ class WakeTests(unittest.IsolatedAsyncioTestCase):
 
         async def tighten(_):
             self.bot.config.scheduler.min_interval_between_chats = 120
-            return {"stream": {"session_id": "session-friend"}}
+            return {"stream": host_stream("friend", False)}
 
         self.bot.ctx.chat.get_stream_by_user_id.side_effect = tighten
         await self.due()
@@ -506,7 +525,7 @@ class WakeTests(unittest.IsolatedAsyncioTestCase):
 
         async def add_isolation(_):
             self.bot.config.scheduler.isolation_time = 15
-            return {"stream": {"session_id": "session-friend"}}
+            return {"stream": host_stream("friend", False)}
 
         self.bot.ctx.chat.get_stream_by_user_id.side_effect = add_isolation
         await self.due(120)
