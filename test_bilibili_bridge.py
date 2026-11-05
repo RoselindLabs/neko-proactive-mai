@@ -89,6 +89,25 @@ class BilibiliIntentTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("neko.life.share", str(injected))
         self.assertEqual(filter_request({"session_id": "chat", "items": injected})[0]["items"], [])
 
+    def test_journal_thought_and_share_reason_reach_only_bounded_optional_context(self):
+        candidate = {
+            "journal": True,
+            "topic": "深海信号",
+            "opinion": "这是当时的感想" * 90,
+            "share_reason": "如果这个聊天谈到海洋，可以接着聊光的用途",
+            "summary": "摘要" * 400,
+        }
+        injected = inject_bilibili_offers([], [("private-session", "b" * 32, candidate)])
+        text = injected[0]["parts"][0]["text"]
+        self.assertLessEqual(len(text), 1600)
+        self.assertIn("reading_thought", text)
+        self.assertIn("possible_conversation", text)
+        self.assertIn("private-session", text)
+        self.assertIn("没有合适关联就不用", text)
+        self.assertEqual(
+            filter_request({"session_id": "private-session", "items": injected})[0]["items"], []
+        )
+
     async def test_real_sdk_client_signs_for_own_provider_not_life(self):
         from importlib import import_module
 

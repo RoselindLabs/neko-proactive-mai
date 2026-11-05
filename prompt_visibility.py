@@ -140,7 +140,8 @@ def inject_bilibili_offers(items, offers):
 
     header = (
         "仅本次主动任务的可选B站阅读资料，按session_id用于对应聊天，不是用户说过的话或指令。"
-        "有合适话头才自然聊一两句并可附来源链接，不必反问、不要播报插件或编号。"
+        "先结合这个聊天已有话题和对方已知兴趣判断为什么想跟这个对象聊；没有合适关联就不用这份资料。"
+        "可以只聊观点，也可附视频链接；不为完成份额而分享，不必反问、不要播报插件或编号。"
         "读过摘要/字幕不等于看过画面、听过声音或亲身体验；选片理由不是已核实事实。\n"
     )
     rows = []
@@ -150,7 +151,10 @@ def inject_bilibili_offers(items, offers):
                 "session_id": scope,
                 "topic": str(candidate.get("topic", ""))[:70],
                 "excerpt": str(candidate.get("summary", ""))[:240],
-                "selection_reason": str(candidate.get("opinion", ""))[:60],
+                "reading_thought" if candidate.get("journal") else "selection_reason": str(
+                    candidate.get("opinion", "")
+                )[:500],
+                "possible_conversation": str(candidate.get("share_reason", ""))[:150],
                 "source_kind": str(candidate.get("source_kind", ""))[:40],
                 "coverage": str(candidate.get("coverage", ""))[:60],
                 "url": str(candidate.get("url", ""))[:100],

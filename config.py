@@ -112,7 +112,7 @@ class LifeSection(PluginConfigBase):
 class BilibiliSection(PluginConfigBase):
     enabled: bool = Field(
         default=False,
-        description="领取自己fork的B站已读资料作为本次主动聊天可选素材；不触发浏览/模型，不代表已发QQ。还须B站侧独立开启并允许同一群。",
+        description="领取B站阅读手记作为本次主动聊天可选素材；按当前聊天判断是否想分享。双方须允许同一群或私聊，资料提供不等于已发QQ。",
     )
 
 
