@@ -1,4 +1,5 @@
 import json
+import copy
 import asyncio
 import threading
 import importlib
@@ -13,6 +14,183 @@ import test_intent as intents
 from prompt_visibility import pending_offers, filter_request, inject_bilibili_offers, EPHEMERAL
 import test_prompt_visibility as visibility
 import test_wakes as wakes
+
+
+class BilibiliProjectionTests(unittest.TestCase):
+    def project(self, candidate, scope="synthetic-chat"):
+        result = inject_bilibili_offers([], [(scope, "a" * 32, candidate)])
+        self.assertEqual(len(result), 1)
+        text = result[0]["parts"][0]["text"]
+        self.assertLessEqual(len(text), 1600)
+        self.assertIn("引用匹配不等于事实核验", text)
+        return text, json.loads(text.split("\n", 1)[1])
+
+    def test_quote_prioritizes_shared_excerpt_budget_and_legacy_summary_still_works(self):
+        candidate = {
+            "evidence_quote": '原文说："海底有光"\\\n' * 5,
+            "summary": "背景" * 240,
+            "opinion": "这是感想",
+            "share_reason": "这是分享缘由",
+            "journal": True,
+        }
+        before = copy.deepcopy(candidate)
+        _, row = self.project(candidate)
+        self.assertEqual(row["evidence_quote"], candidate["evidence_quote"])
+        self.assertEqual(row["excerpt"], candidate["summary"][: 240 - len(row["evidence_quote"])])
+        self.assertEqual(row["reading_thought"], candidate["opinion"])
+        self.assertEqual(row["possible_conversation"], candidate["share_reason"])
+        self.assertEqual(candidate, before)
+        for quote in (None, "", 42, [], {}):
+            with self.subTest(quote=quote):
+                legacy = {"summary": "背景" * 240, "evidence_quote": quote}
+                _, row = self.project(legacy)
+                self.assertEqual(row["evidence_quote"], "")
+                self.assertEqual(row["excerpt"], legacy["summary"][:240])
+        _, row = self.project({"summary": "旧素材"})
+        self.assertEqual(row["excerpt"], "旧素材")
+        self.assertEqual(row["evidence_quote"], "")
+
+    def test_maximum_fields_fit_escaped_json_and_keep_routing_and_source(self):
+        for special in ('"\\\n', "\x00", "海🌊"):
+            with self.subTest(special=special):
+                candidate = {
+                    "evidence_quote": (special * 400)[:400],
+                    "summary": (special * 480)[:480],
+                    "opinion": (special * 800)[:800],
+                    "share_reason": (special * 200)[:200],
+                    "topic": (special * 160)[:160],
+                    "source_kind": "字幕" * 50,
+                    "coverage": "覆盖说明" * 40,
+                    "url": "https://www.bilibili.com/video/BV1234567890",
+                    "journal": True,
+                }
+                scope = 'chat"\\' + "群" * 122
+                text, row = self.project(candidate, scope)
+                self.assertEqual(row["session_id"], scope)
+                for field, limit in (("source_kind", 40), ("coverage", 60), ("url", 100)):
+                    self.assertEqual(row[field], candidate[field][:limit])
+                self.assertLessEqual(len(row["evidence_quote"]) + len(row["excerpt"]), 240)
+                self.assertTrue(row["evidence_quote"])
+                self.assertTrue(candidate["evidence_quote"].startswith(row["evidence_quote"]))
+                if len(row["evidence_quote"]) < 240:
+                    for field in ("excerpt", "possible_conversation", "topic", "reading_thought"):
+                        self.assertEqual(row[field], "")
+                    self.assertGreater(len(text), 1594)
+                else:
+                    self.assertEqual(row["evidence_quote"], candidate["evidence_quote"][:240])
+
+    def test_background_shrinks_before_quote_and_untrusted_types_are_not_stringified(self):
+        candidate = {
+            "evidence_quote": "引用",
+            "summary": "\x00" * 480,
+            "opinion": "\x00" * 800,
+            "share_reason": "\x00" * 200,
+            "topic": "\x00" * 160,
+            "journal": True,
+        }
+        _, row = self.project(candidate)
+        self.assertEqual(row["evidence_quote"], "引用")
+        self.assertEqual(row["excerpt"], "")
+        self.assertEqual(row["possible_conversation"], "")
+        self.assertEqual(row["topic"], "")
+        self.assertTrue(row["reading_thought"])
+
+        class BadValue:
+            def __str__(self):
+                raise AssertionError("untrusted value must not be stringified")
+
+            def __bool__(self):
+                raise AssertionError("journal must be a real boolean")
+
+        for value in (BadValue(), [], {}, False, 1, None):
+            with self.subTest(type=type(value).__name__):
+                _, row = self.project(dict.fromkeys(candidate, value))
+                self.assertTrue(all(v == "" for k, v in row.items() if k != "session_id"))
+        for candidate in (None, [], "invalid"):
+            self.assertEqual(inject_bilibili_offers([], [("chat", "a" * 32, candidate)]), [])
+
+    def test_multiple_scopes_share_total_budget_and_next_request_drops_material(self):
+        offers = [(f"chat-{i}", str(i) * 32, {"evidence_quote": '"' * 400}) for i in range(3)]
+        items = inject_bilibili_offers([], offers)
+        text = items[0]["parts"][0]["text"]
+        self.assertLessEqual(len(text), 1600)
+        rows = [json.loads(line) for line in text.split("\n")[1:]]
+        self.assertEqual([row["session_id"] for row in rows], ["chat-0", "chat-1"])
+        self.assertEqual(len(rows[0]["evidence_quote"]), 240)
+        self.assertLess(len(rows[-1]["evidence_quote"]), 240)
+        for row in rows:
+            self.assertLessEqual(len(row["evidence_quote"]) + len(row["excerpt"]), 240)
+        self.assertEqual(filter_request({"items": items})[0]["items"], [])
+        for scope in (None, [], "", "x" * 129, "chat\n"):
+            self.assertEqual(inject_bilibili_offers([], [(scope, "a" * 32, {})]), [])
+        oversized_source = dict.fromkeys(("source_kind", "coverage", "url"), "\x00" * 100)
+        self.assertEqual(inject_bilibili_offers([], [('"' * 128, "a" * 32, oversized_source)]), [])
+
+
+class BilibiliQuoteHookTests(unittest.IsolatedAsyncioTestCase):
+    setUp = wakes.WakeTests.setUp
+
+    async def test_sdk_quote_reaches_actual_planner_hook_once_without_rewriting_history(self):
+        directory = Path(self.directory.name)
+        key = directory / "bilibili-client.json"
+        key.write_text(json.dumps({"neko.proactive": "ab" * 32}), encoding="utf-8")
+        key.chmod(0o600)
+        candidate = {
+            "evidence_quote": '原文引用"海底"\\\n' * 25,
+            "summary": "背景" * 240,
+            "opinion": "感想" * 400,
+            "journal": True,
+            "source_kind": "subtitle",
+            "coverage": "片段",
+            "url": "https://www.bilibili.com/video/BV1234567890",
+        }
+        packets = []
+
+        async def rpc(method, plugin_id, payload):
+            self.assertEqual(payload["capability"], "api.call")
+            packet = payload["args"]["args"]["packet"]
+            self.assertEqual(packet["operation"], "prompt")
+            self.assertEqual(packet["body"]["session_id"], self.state.stream_id)
+            self.assertEqual(packet["body"]["receipt_id"], "a" * 32)
+            packets.append(packet)
+            return {
+                "success": True,
+                "result": {"success": True, "candidate": candidate if len(packets) == 1 else None},
+            }
+
+        self.bot.ctx = PluginContext(
+            "neko.proactive",
+            rpc_call=rpc,
+            paths=PluginPaths(directory, directory / "runtime"),
+        )
+        self.bot.config.life.enabled = False
+        self.bot.config.bilibili.enabled = True
+        task = visibility.task(int(wakes.NOW * 1000)).replace(
+            "attention_proactive",
+            'attention_proactive\n<neko_bilibili_offer receipt_id="' + "a" * 32 + '"/>',
+        )
+        ordinary = visibility.item("用户的原话")
+        request = {"session_id": self.state.stream_id, "items": [ordinary, visibility.item(task)]}
+        before = copy.deepcopy(request)
+        with patch("time.time", return_value=wakes.NOW + 1):
+            hook = await self.bot.filter_planner_tasks(**request)
+            projected = hook["modified_kwargs"]["items"]
+            text = projected[-1]["parts"][0]["text"]
+            row = json.loads(text.split("\n", 1)[1])
+            self.assertLessEqual(len(text), 1600)
+            self.assertEqual(row["session_id"], self.state.stream_id)
+            self.assertEqual(row["evidence_quote"], candidate["evidence_quote"][:240])
+            self.assertEqual(projected[0], ordinary)
+            self.assertEqual(request, before)
+            next_hook = await self.bot.filter_planner_tasks(**hook["modified_kwargs"])
+            self.assertEqual(next_hook["modified_kwargs"]["items"], [ordinary])
+            self.assertEqual(len(packets), 1)
+            replay = await self.bot.filter_planner_tasks(**request)
+            self.assertEqual(replay["modified_kwargs"]["items"], [ordinary])
+            self.assertEqual(len(packets), 2)
+            self.bot.config.target.allowed_friends = []
+            await self.bot.filter_planner_tasks(**request)
+            self.assertEqual(len(packets), 2)
 
 
 class BilibiliIntentTests(unittest.IsolatedAsyncioTestCase):
