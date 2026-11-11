@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import unittest
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace, ModuleType
 
@@ -37,6 +38,7 @@ async def verify(host, legacy_ref):
         MaisakaReasoningEngine._build_tool_execution_context,
         execution_context,
         ComponentQueryService._build_tool_invocation_payload,
+        ComponentQueryService._parse_tool_invoke_result,
         MaisakaHeartFlowChatting.search_deferred_tool_specs,
     ):
         path = Path(method.__code__.co_filename).resolve()
@@ -246,6 +248,24 @@ def main():
         import neko_pytest_guard  # noqa: F401 -- denies all network before Host imports
 
         result = asyncio.run(verify(host, args.legacy_ref))
+        from src.plugin_runtime.component_query import ComponentQueryService
+        from test_tool_results import VisibleResultTests
+
+        def model_content(raw):
+            parsed = ComponentQueryService._parse_tool_invoke_result(
+                SimpleNamespace(name="offline_plan", plugin_id="neko.proactive"), raw
+            )
+            assert parsed.success == raw["success"]
+            assert parsed.structured_content == raw
+            assert parsed.content == raw["content"]
+            return parsed.content
+
+        # Run actual behavioral flows through Host's parser, not a mirrored snapshot.
+        VisibleResultTests.content = staticmethod(model_content)
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(VisibleResultTests)
+        checked = unittest.TextTestRunner(verbosity=2).run(suite)
+        assert checked.wasSuccessful() and not checked.skipped
+        result["host_content_behavior_tests"] = checked.testsRun
     text = json.dumps(result, ensure_ascii=False, indent=2)
     if report:
         report.write_text(text + "\n", encoding="utf-8")

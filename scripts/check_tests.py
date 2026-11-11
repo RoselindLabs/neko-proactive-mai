@@ -36,6 +36,7 @@ def main():
         "test_multi_wakes",
         "test_admission",
         "test_telegram_plans",
+        "test_tool_results",
     ):
         if not any(name.startswith(module + ".") for name in discovered):
             raise SystemExit("Required proactive test group is empty: " + module)

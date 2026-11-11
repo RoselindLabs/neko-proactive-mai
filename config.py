@@ -25,7 +25,7 @@ PRIVATE_PROACTIVE_INTENT = (
 class PluginSection(PluginConfigBase):
     enabled: bool = Field(default=True, description="是否启用插件")
     config_version: str = Field(default="2.0.0", description="配置文件版本号")
-    version: str = Field(default="2.10.2", description="插件版本，由维护流程更新，无需手改")
+    version: str = Field(default="2.10.3", description="插件版本，由维护流程更新，无需手改")
 
 
 class SchedulerSection(PluginConfigBase):

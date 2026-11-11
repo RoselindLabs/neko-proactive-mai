@@ -237,8 +237,8 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
 
     @Tool(
         "neko_proactive_wake",
-        description="单次预约：一次性稍后续聊或回顾，可保留多条。每天或每隔N天等明确周期请用neko_proactive_repeat，不要拆成单次。get查看、add新增、update修改、cancel取消；at填北京时间10分钟后、21:30、明天09:00或日期时间，未来1分钟至7天；intent写话题和依据。update/cancel带get返回的item_id/version，只改这一条。仅当前授权私聊，到时结合最新聊天决定是否开口。",
-        brief_description="单次预约：一次性稍后续聊或回顾，可保留多条。每天或每隔N天等明确周期请用neko_proactive_repeat，不要拆成单次。get查看、add新增、update修改、cancel取消；at填北京时间10分钟后、21:30、明天09:00或日期时间，未来1分钟至7天；intent写话题和依据。update/cancel带get返回的item_id/version，只改这一条。仅当前授权私聊，到时结合最新聊天决定是否开口。",
+        description="单次预约/定时提醒：一次性稍后续聊或回顾，可保留多条。每天或每隔N天用neko_proactive_repeat。get查看、add新增、update修改、cancel取消；add必填at和intent。at用北京时间10分钟后、21:30、明天09:00或日期时间，未来1分钟至7天；HH:MM只指今天，过时不顺延。intent写1～240字话题和依据。已有安排先get再按item_id/version修改或取消；update省略at/intent保留，不要每轮新增。仅当前授权私聊，到时可沉默，不是可靠闹钟；unknown不可为补发重加。",
+        brief_description="单次预约/定时提醒：一次性稍后续聊或回顾，可保留多条。每天或每隔N天用neko_proactive_repeat。get查看、add新增、update修改、cancel取消；add必填at和intent。at用北京时间10分钟后、21:30、明天09:00或日期时间，未来1分钟至7天；HH:MM只指今天，过时不顺延。intent写1～240字话题和依据。已有安排先get再按item_id/version修改或取消；update省略at/intent保留，不要每轮新增。仅当前授权私聊，到时可沉默，不是可靠闹钟；unknown不可为补发重加。",
         detailed_description="HH:MM指今天，已过时刻不顺延。新增不会覆盖其他预约；修改只限未来未尝试项，取消只限待执行项。",
         parameters=[
             ToolParameterInfo(
@@ -252,7 +252,9 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 required=False,
             ),
             ToolParameterInfo(
-                name="intent", description="本次唤醒的简短意图与依据，最多240字符", required=False
+                name="intent",
+                description="1～240字话题与依据；add必填，update省略保留",
+                required=False,
             ),
             ToolParameterInfo(
                 name="item_id", description="get返回的预约ID，update/cancel必填", required=False
@@ -270,6 +272,8 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
     async def private_wake(
         self, action="get", at="", timezone="", intent="", item_id="", version="", **kwargs
     ):
+        from .webui import tool_result
+
         try:
             async with self._wake_lock:
                 if not self._wake_ready or not self._automatic_enabled():
@@ -300,32 +304,43 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                     key=lambda r: r["due"],
                 )
                 view = [{**r, "item_id": r["id"], "version": item_version(r)} for r in rows]
-                return {
-                    "success": True,
-                    "wake": row,
-                    "items": view,
-                    "message": {
-                        "get": "当前单次预约列表",
-                        "set": "单次预约已新增",
-                        "add": "单次预约已新增",
-                        "update": "这条单次预约已修改",
-                        "cancel": "这条单次预约已取消",
-                    }[action],
-                    "next_at": next((r["at"] for r in rows if r["status"] in PENDING), None),
-                }
+                return tool_result(
+                    "wake",
+                    {
+                        "success": True,
+                        "wake": row,
+                        "items": view,
+                        "message": {
+                            "get": "当前单次预约列表",
+                            "set": "单次预约已新增",
+                            "add": "单次预约已新增",
+                            "update": "这条单次预约已修改",
+                            "cancel": "这条单次预约已取消",
+                        }[action],
+                        "next_at": next((r["at"] for r in rows if r["status"] in PENDING), None),
+                    },
+                    selected=row["id"] if row and action != "get" else None,
+                )
         except (ValueError, OSError) as exc:
             from .webui import ERRORS
 
-            return {
-                "success": False,
-                "error": str(exc) if isinstance(exc, ValueError) else "wake_storage_unavailable",
-                "message": ERRORS.get(str(exc), "单次预约未完成，请核对当前私聊、北京时间和依据"),
-            }
+            return tool_result(
+                "wake",
+                {
+                    "success": False,
+                    "error": str(exc)
+                    if isinstance(exc, ValueError)
+                    else "wake_storage_unavailable",
+                    "message": ERRORS.get(
+                        str(exc), "单次预约未完成，请核对当前私聊、北京时间和依据"
+                    ),
+                },
+            )
 
     @Tool(
         "neko_proactive_repeat",
-        description="重复预约：每天、每隔N天或固定间隔续聊/回顾，当前授权私聊只保留一份重复计划。get查看、set设置/修改、pause暂停、resume继续、delete删除。interval_minutes为1～10080分钟：5表示每5分钟、120每2小时、2880每隔2天；或local_time=21:00表示每天北京时间21点，二选一。intent写话题和依据，已有计划可只改intent；不支持指定星期或每月。一次性预约请用neko_proactive_wake。到时结合最新聊天决定是否开口。",
-        brief_description="重复预约：每天、每隔N天或固定间隔续聊/回顾，当前授权私聊只保留一份重复计划。get查看、set设置/修改、pause暂停、resume继续、delete删除。interval_minutes为1～10080分钟：5表示每5分钟、120每2小时、2880每隔2天；或local_time=21:00表示每天北京时间21点，二选一。intent写话题和依据，已有计划可只改intent；不支持指定星期或每月。一次性预约请用neko_proactive_wake。到时结合最新聊天决定是否开口。",
+        description="重复预约/计划提醒：每天、每隔N天或固定间隔续聊/回顾，当前授权私聊只保留一份重复计划。get查看、set设置/修改、pause暂停、resume继续、delete删除。首次set必填intent（1～240字依据）及interval_minutes或local_time二选一；分钟1～10080，5每5分钟、120每2小时、2880每隔2天；local_time=21:00为每天北京时间21点。已有计划先get再修改，省略字段保留，编辑暂停计划不自动resume，不必每轮设置。不支持指定星期或每月；一次性用neko_proactive_wake。到时可沉默，不是可靠闹钟；unknown不可为补发重加。",
+        brief_description="重复预约/计划提醒：每天、每隔N天或固定间隔续聊/回顾，当前授权私聊只保留一份重复计划。get查看、set设置/修改、pause暂停、resume继续、delete删除。首次set必填intent（1～240字依据）及interval_minutes或local_time二选一；分钟1～10080，5每5分钟、120每2小时、2880每隔2天；local_time=21:00为每天北京时间21点。已有计划先get再修改，省略字段保留，编辑暂停计划不自动resume，不必每轮设置。不支持指定星期或每月；一次性用neko_proactive_wake。到时可沉默，不是可靠闹钟；unknown不可为补发重加。",
         parameters=[
             ToolParameterInfo(
                 name="action",
@@ -345,7 +360,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
             ),
             ToolParameterInfo(
                 name="intent",
-                description="以后醒来联系的简短话题/依据，最多240字；不是预写正文",
+                description="1～240字话题/依据；首次set必填，修改省略保留；不是预写正文",
                 required=False,
             ),
         ],
@@ -364,13 +379,24 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
         at="",
         **kwargs,
     ):
+        from .webui import tool_result
+
         # Same trusted caller path; never accept a model-supplied target/session.
         if action not in ("get", "set", "pause", "resume", "delete"):
-            return {"success": False, "message": "请选择get、set、pause、resume或delete"}
+            return tool_result(
+                "repeat",
+                {
+                    "success": False,
+                    "message": "请选择get、set、pause、resume或delete",
+                    "error": "invalid_action",
+                },
+            )
         async with self._wake_lock:
             probe = await self._repeat_identity(kwargs)
             if not probe:
-                return {"success": False, "message": "当前没有可用的已授权私聊上下文"}
+                return tool_result(
+                    "repeat", {"success": False, "message": "当前没有可用的已授权私聊上下文"}
+                )
             target, session = probe
             try:
                 plan = self._change_wake_locked(
@@ -388,30 +414,39 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                     simple=not timezone,
                 )
                 current = plan["current"] if plan else None
-                return {
-                    "success": True,
-                    "message": {
-                        "get": "当前重复联系节奏",
-                        "set": "重复计划已保存",
-                        "pause": "重复计划已暂停",
-                        "resume": "重复计划从未来继续",
-                        "delete": "重复计划已删除，保留已有防重间隔",
-                    }[action],
-                    "repeat": plan,
-                    "next_at": current["at"]
-                    if plan and plan["enabled"] and action != "delete"
-                    else None,
-                }
+                return tool_result(
+                    "repeat",
+                    {
+                        "success": True,
+                        "message": {
+                            "get": "当前重复联系节奏",
+                            "set": "重复计划已保存",
+                            "pause": "重复计划已暂停",
+                            "resume": "重复计划从未来继续",
+                            "delete": "重复计划已删除，保留已有防重间隔",
+                        }[action],
+                        "repeat": plan,
+                        "next_at": current["at"]
+                        if plan and plan["enabled"] and action != "delete"
+                        else None,
+                    },
+                    selected=action,
+                )
             except (ValueError, OSError) as exc:
                 from .webui import ERRORS
 
-                return {
-                    "success": False,
-                    "message": ERRORS.get(str(exc), "重复计划未保存，请检查间隔、北京时间和意图"),
-                    "error": str(exc)
-                    if isinstance(exc, ValueError)
-                    else "wake_storage_unavailable",
-                }
+                return tool_result(
+                    "repeat",
+                    {
+                        "success": False,
+                        "message": ERRORS.get(
+                            str(exc), "重复计划未保存，请检查间隔、北京时间和意图"
+                        ),
+                        "error": str(exc)
+                        if isinstance(exc, ValueError)
+                        else "wake_storage_unavailable",
+                    },
+                )
 
     async def _repeat_identity(self, kwargs):
         host = kwargs.get("_host_context")
@@ -464,7 +499,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
 
     @Tool(
         "neko_proactive_dayplan",
-        brief_description="记录今天想留到稍后整理、关注或继续的话题，只安排今天，不能设置明天或以后。get查看、add添加、update修改、cancel取消；at填今天北京时间HH:MM（如21:30），至少1分钟后；intent写想做的事及依据。最多6项，可以留空，不必凑满，不把计划当已发生的经历。update/cancel带get返回的item_id/version，只改未来未尝试项；到时再决定是否开口。",
+        brief_description="今天日程/计划提醒：记录稍后整理、关注或继续的话题，只安排今天，不能设置明天或以后。get查看、add添加、update修改、cancel取消；add必填at和intent。at用今天北京时间HH:MM（如21:30），至少1分钟后，过时不顺延；intent写1～240字事项及依据。最多6项，可留空，不把计划当已发生经历。已有安排先get再按item_id/version修改或取消，只限未来未尝试项；update省略at/intent保留，不要每轮新增。到时可沉默，不是可靠闹钟；unknown不可为补发重加。",
         parameters=[
             ToolParameterInfo(
                 name="action",
@@ -473,12 +508,12 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
             ),
             ToolParameterInfo(
                 name="at",
-                description="仅今天北京时间HH:MM，如21:30；未来至少1分钟，不接受明天",
+                description="今天北京时间HH:MM，如21:30；未来至少1分钟；add必填，update省略保留",
                 required=False,
             ),
             ToolParameterInfo(
                 name="intent",
-                description="这项想关注/整理的事及已知依据，1～240字；计划不代表现实已做过",
+                description="1～240字事项及依据；add必填，update省略保留；计划不代表已做过",
                 required=False,
             ),
             ToolParameterInfo(
@@ -500,8 +535,9 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
         self, action="get", at="", timezone="", intent="", item_id="", version="", **kwargs
     ):
         from .dayplan import get_day
-        from .webui import ERRORS
+        from .webui import ERRORS, tool_result
 
+        selected = None
         try:
             async with self._wake_lock:
                 epoch = self._management_epoch
@@ -532,7 +568,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                         timezone or DEFAULT_ZONE,
                     )
                 elif action in ("add", "update", "cancel"):
-                    self._change_wake_locked(
+                    changed = self._change_wake_locked(
                         "day_" + action,
                         target,
                         session,
@@ -545,22 +581,34 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                         },
                         simple=not timezone,
                     )
+                    selected = changed["id"]
                     result = get_day(self._get_wakes().read(), target, session, time.time())
                 else:
                     raise ValueError("invalid_action")
-                return {
-                    "success": True,
-                    "message": "当天事项已更新；只是计划，到点再判断"
-                    if action != "get"
-                    else "今天日程，留空也正常",
-                    "dayplan": result,
-                }
+                return tool_result(
+                    "dayplan",
+                    {
+                        "success": True,
+                        "message": "当天事项已更新；只是计划，到点再判断"
+                        if action != "get"
+                        else "今天日程，留空也正常",
+                        "dayplan": result,
+                    },
+                    selected=selected,
+                )
         except (ValueError, OSError) as exc:
-            return {
-                "success": False,
-                "message": ERRORS.get(str(exc), "当天事项未完成，请核对今天的北京时间、依据和版本"),
-                "error": str(exc) if isinstance(exc, ValueError) else "wake_storage_unavailable",
-            }
+            return tool_result(
+                "dayplan",
+                {
+                    "success": False,
+                    "message": ERRORS.get(
+                        str(exc), "当天事项未完成，请核对今天的北京时间、依据和版本"
+                    ),
+                    "error": str(exc)
+                    if isinstance(exc, ValueError)
+                    else "wake_storage_unavailable",
+                },
+            )
 
     def _change_wake_locked(
         self,

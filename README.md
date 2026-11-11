@@ -2,6 +2,10 @@
 
 MaiBot 主动聊天调度插件，插件 ID 为 `neko.proactive`。
 
+## 2.10.3 · 计划工具业务结果可见性
+
+单次、重复和今天日程工具现在在SDK实际使用的`content`中返回有界业务投影：操作结果、计划时刻、状态、intent、item_id/version及下次时间；原有dict字段保持兼容。列表过多会明确标记截断并说明到管理页继续，不泄漏session/task/retry等内部字段。新增单次/日程必须同时填写北京时间`at`和`intent`；已有安排先get，更新省略字段保留，暂停计划编辑不会自动恢复。`submitted`仅表示Host入队，`unknown`不表示未发送且不触发补发；到时仍由Planner结合最新聊天决定是否开口，属于计划提示而非可靠闹钟。
+
 ## 2.10.2 · B站阅读引用传递
 
 接收B站0.13.4的可选`candidate.evidence_quote`（字符串≤400字，由提供端校验并匹配阅读正文）。本次临时提示在原正文摘录240字内先放引用、余量放`summary`背景；旧素材无引用仍用摘要。明确区分引用片段、正文背景、读后感想和分享缘由，引用可能截短，匹配正文不等于事实核验。
@@ -184,7 +188,7 @@ Life已退役时保持`life.enabled=false`，普通群私意图、概率、时�
 [plugin]
 enabled = false
 config_version = "2.0.0"
-version = "2.10.2"
+version = "2.10.3"
 
 [scheduler]
 enabled = true

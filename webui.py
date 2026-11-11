@@ -92,6 +92,136 @@ ERRORS = {
 }
 
 
+def tool_result(kind, result, *, selected=None):
+    """LLM-visible business projection; keep the original API fields untouched."""
+    from .dayplan import item_version
+    from .repeat import zone_info
+
+    def item(row):
+        view = {
+            "item_id": row.get("item_id", row.get("id")),
+            "version": row.get("version") or item_version(row),
+            "at": row["at"],
+            "intent": row["intent"],
+            "status": row["status"],
+        }
+        if row.get("timezone"):
+            view["timezone"] = row["timezone"]
+        editable = row.get("can_edit", row["status"] in PENDING and row.get("due", 0) > time.time())
+        view["can_update"] = editable
+        view["can_cancel"] = editable if kind == "dayplan" else row["status"] in PENDING
+        if row.get("block"):
+            view["reason"] = REASONS.get(row["block"], "等待条件或历史原因未识别")
+        if row.get("planner_requested_at"):
+            view["observation"] = "已到达Planner请求前Hook，不证明模型完成或消息送达"
+        elif row.get("shown"):
+            view["observation"] = "旧记录仅确认临时提示已提供，不推断是否回复"
+        return view
+
+    if not result["success"]:
+        code = result.get("error", "")
+        hints = {
+            "invalid_action": "按工具action枚举选择操作；先get查看已有计划。",
+            "invalid_time_or_intent": "新增须同时填写at和1～240字intent；时间用北京时间，update省略字段保留原值。",
+            "invalid_day_input": "at、intent、item_id、version须为文本；新增at填今天北京时间HH:MM，intent为1～240字。",
+            "invalid_repeat": "首次set须填1～240字intent，并选interval_minutes或local_time；已有计划先get，省略字段保留。",
+            "invalid_timezone": "模型无需填写timezone；新计划用北京时间。旧计划时区异常请让管理员核查。",
+            "timezone_offset_required": "at用工具支持的北京时间格式，无需填写timezone或UTC偏移。",
+            "timezone_offset_mismatch": "at用工具支持的北京时间格式，无需填写timezone或UTC偏移。",
+            "day_timezone_fixed": "旧日程保留原时区；新at仍填今天北京时间HH:MM，无需填写timezone。",
+            "stale_wake_revision": "版本已变化；重新get，核对目标item_id及最新version后再update/cancel，不要改为add。",
+            "single_identity_required": "先get，复制目标的完整item_id和version再update/cancel；不要猜编号或改为add。",
+            "single_not_found": "未找到目标；重新get核对item_id/version，不要猜编号或改为add。",
+            "day_item_not_found": "未找到目标；先get，再复制目标item_id/version；不要猜编号或改为add。",
+            "wake_disabled": "插件或调度未就绪/关闭；当前工具未执行，请让管理员核查开关。",
+            "wake_storage_unavailable": "存储不可用；请让管理员核查，勿通过新建计划补发。",
+        }
+        message = hints.get(code, result["message"])
+        return {
+            **result,
+            "message": message,
+            "content": message + " unknown不代表未发送，不能为补发重加计划。",
+        }
+
+    view = {"next_at": result.get("next_at")}
+    rows = []
+    if kind == "wake":
+        rows = result["items"]
+    elif kind == "dayplan":
+        day = result["dayplan"]
+        view.update({key: day[key] for key in ("date", "timezone", "remaining", "next_at")})
+        rows = day["items"]
+        view["previous"] = [{"at": r["at"], "status": r["status"]} for r in day.get("previous", [])]
+    else:
+        plan = result["repeat"]
+        view["repeat"] = None
+        if plan:
+            view["repeat"] = {
+                "item_id": plan["id"],
+                "state": "deleted"
+                if result["next_at"] is None and selected == "delete"
+                else plan["state"],
+                "timezone": plan["timezone"],
+                "intent": plan["intent"],
+                "interval_minutes": plan["interval"] // 60 if plan["kind"] == "interval" else None,
+                "local_time": plan["clock"] if plan["kind"] == "daily" else None,
+                "planned_at": plan["current"]["at"],
+                "current_status": plan["current"]["status"],
+                "last": item(plan["last"]) if plan.get("last") else None,
+            }
+            if plan.get("last_skip"):
+                view["repeat"]["last_skip"] = {
+                    "at": datetime.fromtimestamp(
+                        plan["last_skip"]["due"], zone_info(plan["timezone"])
+                    ).isoformat(),
+                    "reason": REASONS.get(plan["last_skip"]["reason"], "已跳过，不补播"),
+                }
+
+    if kind != "repeat":
+        # Always include the mutation target even when it sorts beyond the list budget.
+        chosen = next((r for r in rows if r.get("item_id", r.get("id")) == selected), None)
+        if chosen:
+            view["selected"] = item(chosen)
+        ordered = [r for r in rows if r is not chosen]
+        view["items"] = []
+        for row in ordered:
+            projected = item(row)
+            if len(view["items"]) >= 20:
+                break
+            view["items"].append(projected)
+            if len(json.dumps(view, ensure_ascii=False)) > 12000:
+                view["items"].pop()
+                break
+        shown = len(view["items"]) + bool(chosen)
+        view.update(total=len(rows), shown=shown, truncated=shown < len(rows))
+        if view["truncated"]:
+            view["continue"] = (
+                "列表已截断；未展示不等于不存在。当前工具没有翻页参数，请管理员在主动唤醒管理页查看剩余项；不要猜ID/version或重复新增。"
+            )
+
+    guidance = (
+        "到时只唤醒Planner结合最新聊天判断，可以沉默；不是可靠闹钟或送达承诺。"
+        "scheduled=待执行；blocked=等待条件；submitted=仅Host已入队，不是已回复/送达；"
+        "unknown=提交结果未知，不能认定未发送或为补发重加；rejected=Host明确拒绝；"
+        "cancelled=已取消，不撤回已入队任务；expired=已错过、不补播；revoked=授权/会话失效。"
+        "next_at为下次计划时刻，不保证实际执行时刻；null表示没有可执行的下一项。"
+    )
+    if kind == "repeat":
+        guidance += "重复计划先get再set修改，省略字段保留；编辑暂停计划不会恢复，resume才继续。last是历史轮次，不是待执行项；重复工具没有version/CAS参数。"
+    else:
+        guidance += (
+            "已有安排先get后按item_id/version修改，update省略at/intent保留原值；不要每轮新增。"
+        )
+    return {
+        **result,
+        "content": result["message"]
+        + "\n"
+        + json.dumps(view, ensure_ascii=False)
+        + "\n"
+        + guidance,
+    }
+
+
 def wall_instant(when, zone):
     from .repeat import zone_info
 

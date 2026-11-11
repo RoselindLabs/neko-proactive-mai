@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "version": "2.10.2",
+  "version": "2.10.3",
   "name": "Neko Proactive Mai",
   "description": "MaiBot主动聊天调度：按白名单、时段、概率和冷却，把群聊/私聊意图交给Planner决定。",
   "author": {
