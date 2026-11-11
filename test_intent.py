@@ -143,7 +143,15 @@ class LifeIntentTests(unittest.IsolatedAsyncioTestCase):
                 "isolation_time": 15,
             },
         )
-        self.assertEqual(cfg.target.model_dump(), {"allowed_groups": [], "allowed_friends": []})
+        self.assertEqual(
+            cfg.target.model_dump(),
+            {
+                "allowed_groups": [],
+                "allowed_friends": [],
+                "telegram_account_id": "",
+                "allowed_telegram_user_ids": [],
+            },
+        )
         self.assertFalse(cfg.life.enabled)
         self.assertFalse(cfg.bilibili.enabled)
 

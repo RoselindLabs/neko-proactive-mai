@@ -331,10 +331,14 @@ class RepeatTests(unittest.IsolatedAsyncioTestCase):
         components = {c["name"]: c for c in self.bot.get_components()}
         for name in ("neko_proactive_wake", "neko_proactive_repeat"):
             metadata = components[name]["metadata"]
-            self.assertIn("醒来思考", metadata["description"])
+            self.assertIn("预约", metadata["description"])
+            # SDK 2.22 normalizes the alias away; older supported SDKs retain it.
+            self.assertEqual(
+                metadata["description"], metadata.get("brief_description", metadata["description"])
+            )
             self.assertIn("get", metadata["description"])
             self.assertNotIn("target", {p["name"] for p in metadata["parameters"]})
-        self.assertIn("持续联系", components["neko_proactive_repeat"]["metadata"]["description"])
+        self.assertIn("每隔N天", components["neko_proactive_repeat"]["metadata"]["description"])
 
     async def test_repeat_hot_config_scheduler_replacement_keeps_plan_unload_cancels_unknown(self):
         await self.create(2)

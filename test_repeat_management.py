@@ -109,6 +109,7 @@ class RepeatManagementTests(unittest.IsolatedAsyncioTestCase):
         )
         before = self.bot._get_wakes().path.read_bytes()
         self.responses[(False, "friend")]["stream"]["session_id"] = "new-session"
+        self.responses[(False, "friend")]["stream"]["stream_id"] = "new-session"
         snapshot = await self.bot.wake_overview()
         self.assertIsNone(snapshot["reservations"][0]["repeat"])
         self.assertNotIn("旧会话私有意图", str(snapshot))

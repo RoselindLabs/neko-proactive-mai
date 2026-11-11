@@ -2,6 +2,22 @@
 
 MaiBot 主动聊天调度插件，插件 ID 为 `neko.proactive`。
 
+## 2.10.0 · Telegram私聊计划与工具检索
+
+- 独立的`target.telegram_account_id`（机器人数字账号ID）和`target.allowed_telegram_user_ids`（用户数字ID列表）均默认空。两项显式配置后，仅该账号已有的TG私聊可用单次、重复计划；QQ同号不会继承授权或计划。机器人账号不是用户名或Token；用户ID不接受`@名字`、负数、前导零或群号。
+- 复用原工具、计划锁、`private-wakes.json`和唯一调度器，走普通Planner回复路径。TG不进入基础主动周期，不开放群/话题计划、今天日程、B站/Life素材或`/saymai`；原回复扩展（如TTS）仍按宿主配置选择。Life开关不变。
+- 工具只消费Host可信当前私聊。Host正常的空`account_id`可用已有会话核实，不要求模型补账号；TG从`chat.get_private_streams(platform="telegram")`精确匹配账号/用户/群私/session，最多512条、2秒查询，多个匹配或缺身份则暂缓。不使用首个多账号会话，不创建stream，不信普通kwargs的身份字段。工具、管理保存、到点提交均复查当前授权。
+- 单次主描述明确“一次性预约”，周期要求指向`neko_proactive_repeat`。重复主描述与brief一致，补“重复预约/每天/每隔N天”检索词及5/120/2880分钟示例；一份重复计划，只支持固定间隔或每天时刻，不支持指定星期/每月。到点仍由Planner结合最新聊天决定是否开口。
+- 管理页按平台、账号、用户和真实session显示与隔离草稿/CAS/历史。TG显示“仅计划唤醒”，隐藏今天日程，不显示TG基础deadline。改账号后旧计划保留为失效历史，不移交新账号。
+
+### 数据兼容与回退
+
+无TG写入时保持v4，读取/配置授权本身不迁移。首次保存TG计划，在原有256KiB/128目标预算与原锁内一次原子写为v5；新TG键为`telegram:<account_id>:<user_id>`，旧QQ裸键及所有既有记录不重命名、不复制，保留ID、时区、锚点、next_due、last_dispatch、unknown和revoked。后续即使删除TG重复计划也保持v5。若旧v4存在保留前缀`telegram:`的歧义键，保原报错，不猜其平台；损坏、超限、替换失败均不覆盖旧文件。
+
+**v5不可裸回退2.9.4或更早版本。** 实际2.9.4读取器拒绝v5，加载失败，不会只忽略TG而安全继续QQ。回退必须保全最新账本，使用兼容v5且保留TG命名空间/unknown/防重语义的修补构建；不能改version、清TG索引或恢复发布前账本来绕过。首次TG写入前纯v4仍可被2.9.4读取，但旧行为缺陷会恢复。升级时确认旧Runner实际退出再加载新版，不并跑两个版本写同一文件。
+
+原重启不补播保持：错过单次标expired，重复只推进到严格未来，未来轮不改；撤权不自动恢复revoked，unknown不清、不重投。新版本模板仅作为示例，不自动填写TG授权或覆盖线上配置。
+
 ## 2.9.4 · B站阅读手记衔接
 
 B站0.10.0的独立感想和分享缘由作为本次聊天的可选素材，优先结合当前对象已有话题与兴趣，允许不用、只谈观点或附视频。仍受1600字符总预算、单次提示、真实会话/账号、双侧群私授权及原调度约束；不新增唤醒、不改时段概率或发送额度，不把shown当送达。配置、v4账本与unknown不迁移、不清理。
@@ -158,7 +174,7 @@ Life已退役时保持`life.enabled=false`，普通群私意图、概率、时�
 [plugin]
 enabled = false
 config_version = "2.0.0"
-version = "2.6.1"
+version = "2.10.0"
 
 [scheduler]
 enabled = true
@@ -173,6 +189,8 @@ isolation_time = 0           # 距上次真人消息至少静默分钟数
 [target]
 allowed_groups = []          # 白名单群号
 allowed_friends = ["12345678"]  # 白名单QQ号
+telegram_account_id = ""      # 显式绑定TG机器人数字账号ID（不是Token）
+allowed_telegram_user_ids = [] # 独立TG私聊用户数字ID；仅单次/重复计划
 
 [log]
 verbose = true
@@ -254,6 +272,8 @@ python -m ruff check .
 python -m ruff format --check .
 python scripts/check_archive.py
 ```
+
+本地有维护Host源码与依赖环境时，可额外运行`python scripts/verify_host_plans.py --host-source <MaiBot源码> --temp-dir <隔离临时目录> --report <报告路径>`。该脚本禁止网络，在临时实例中通过真实SDK注册、Host普通/Focus上下文与参数信封、实际deferred字符串检索、计划存储和调度链核验；只替换底层RPC，不调用模型或QQ/TG。`--legacy-ref f065ed5`额外核验实际2.9.4读取器可读v4、拒读v5且账本不变（需本仓该历史提交）。
 
 测试使用真实SDK及Mock Host/Life、合成时钟和独立持久目录，不接触线上配置/服务；`test_wakes`覆盖预约授权、时区、规则阻挡、重启/崩溃窗口、并发、损坏保护和临时上下文。
 日常源码CI保留Linux生产Python3.14.4/SDK2.16.0及Windows最低Python3.12/SDK2.12两组，完整自有测试、依赖检查、lint与最终源码包真实SDK导入仍跑。按关键意图/桥/生命周期/上下文测试组非空及实际成功守门，不用固定总用例数。原8组完整兼容矩阵保留在v标签、手动full及有源码变化的夜间验证，另保留固定生产组合，不把latest当线上。

@@ -17,6 +17,30 @@ PENDING = {"scheduled", "blocked"}
 STATUSES = PENDING | {"submitted", "rejected", "unknown", "expired", "cancelled", "revoked"}
 
 
+def telegram_key(account, user):
+    """Canonical private-only namespace; never reinterpret a bare QQ identifier."""
+    if any(
+        not isinstance(v, str) or not re.fullmatch(r"[1-9][0-9]{0,19}", v) for v in (account, user)
+    ):
+        raise ValueError("invalid_telegram_identity")
+    return f"telegram:{account}:{user}"
+
+
+def target_identity(target):
+    if target.startswith("telegram:"):
+        parts = target.split(":")
+        if len(parts) != 3 or telegram_key(parts[1], parts[2]) != target:
+            raise ValueError("invalid_telegram_identity")
+        return "telegram", parts[1], parts[2]
+    return "qq", "", target
+
+
+def target_keys(data):
+    return set().union(
+        *(data.get(name, {}) for name in ("slots", "appointments", "repeats", "dayplans"))
+    )
+
+
 def singles(data, target):
     """Primary occurrence and additional independently addressed v4 rows."""
     row = data["slots"].get(target)
@@ -144,7 +168,7 @@ class WakeStore:
         if (
             not isinstance(data, dict)
             or type(data.get("version")) is not int
-            or data.get("version") != 4
+            or data.get("version") not in (4, 5)
             or not number(data.get("last_dispatch"))
             or not isinstance(data.get("slots"), dict)
             or len(data["slots"]) > MAX_TARGETS
@@ -185,10 +209,27 @@ class WakeStore:
             records = singles(data, target)
             if len({r["id"] for r in records}) != len(records):
                 raise ValueError("invalid_wake_record")
+        # v4 never owned a Telegram namespace. Ambiguous legacy keys fail closed,
+        # not silently relabelled as a new platform when authorization is enabled.
+        for target in target_keys(data):
+            if target.startswith("telegram:"):
+                if data["version"] != 5:
+                    raise ValueError("ambiguous_legacy_target")
+                target_identity(target)
+                if target in plans:
+                    raise ValueError("telegram_dayplan_not_supported")
         return data
 
     def write(self, data):
-        self.read()  # Corrupt/unknown disk state is never treated as an empty index.
+        previous = self.read()  # Corrupt/unknown disk state is never treated as an empty index.
+        # First Telegram write is the sole format transition, in the same bounded
+        # atomic replacement as the plan. No QQ row or dispatch timestamp changes.
+        if previous["version"] == 5 or any(t.startswith("telegram:") for t in target_keys(data)):
+            data["version"] = 5
+        for target in target_keys(data):
+            target_identity(target)
+            if target.startswith("telegram:") and target in data.get("dayplans", {}):
+                raise ValueError("telegram_dayplan_not_supported")
         raw = json.dumps(data, ensure_ascii=False, allow_nan=False).encode("utf-8")
         if (
             len(raw) > MAX_BYTES

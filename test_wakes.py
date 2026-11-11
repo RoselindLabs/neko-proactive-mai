@@ -421,7 +421,7 @@ class WakeTests(unittest.IsolatedAsyncioTestCase):
         component = next(c for c in self.bot.get_components() if c["name"] == "neko_proactive_wake")
         self.assertEqual(component["metadata"]["trusted_context"], CONTRACT)
         self.assertEqual(component["metadata"]["chat_scope"], "private")
-        self.assertEqual(component["metadata"]["platforms"], ["qq"])
+        self.assertEqual(component["metadata"]["platforms"], ["qq", "telegram"])
         self.assertEqual(
             {p["name"] for p in component["metadata"]["parameters"]},
             {"action", "at", "intent", "item_id", "version"},

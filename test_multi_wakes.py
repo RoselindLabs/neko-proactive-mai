@@ -30,11 +30,11 @@ class MultiWakeTests(unittest.IsolatedAsyncioTestCase):
     def data(self):
         return self.bot._get_wakes().read()
 
-    async def test_only_v4_is_supported_old_formats_are_never_auto_migrated(self):
+    async def test_pre_v4_and_unknown_formats_are_never_auto_migrated(self):
         store = self.bot._get_wakes()
         self.assertEqual(store.read()["version"], 4)
         self.assertFalse(store.path.exists())
-        for version in (1, 2, 3, 5):
+        for version in (1, 2, 3, 6):
             data = {
                 "version": version,
                 "last_dispatch": 0,

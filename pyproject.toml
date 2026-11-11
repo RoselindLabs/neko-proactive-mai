@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neko-proactive-mai"
-version = "2.9.4"
+version = "2.10.0"
 description = "Planner-driven proactive chat scheduling for MaiBot"
 readme = "README.md"
 license = "AGPL-3.0-or-later"

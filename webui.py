@@ -6,7 +6,15 @@ import hashlib
 import json
 import time
 
-from .wake_store import PENDING, text, singles, selected_single, single_revision
+from .wake_store import (
+    PENDING,
+    text,
+    singles,
+    selected_single,
+    single_revision,
+    target_identity,
+    telegram_key,
+)
 
 STATUSES = {
     "scheduled": "待唤醒",
@@ -45,6 +53,8 @@ REASONS = {
     "day_merge_wait": "等待相近事项一起判断（最多60秒）",
 }
 ERRORS = {
+    "telegram_dayplan_not_supported": "Telegram私聊仅支持单次与重复计划",
+    "invalid_telegram_identity": "请配置Telegram机器人账号与用户的数字ID",
     "simple_wake_time": REASONS["simple_wake_time"],
     "simple_today_time": REASONS["simple_today_time"],
     "simple_repeat_choice": REASONS["simple_repeat_choice"],
@@ -137,6 +147,24 @@ def next_activity(now, start, end):
 
 
 class WakeManagement:
+    def _telegram_targets(self):
+        targets = []
+        for user in self.config.target.allowed_telegram_user_ids:
+            try:
+                targets.append(telegram_key(self.config.target.telegram_account_id, user))
+            except ValueError:
+                continue
+        return list(dict.fromkeys(targets))
+
+    def _plan_allowed(self, target):
+        if target.startswith("telegram:"):
+            return target in self._telegram_targets()
+        return target in {str(v).strip() for v in self.config.target.allowed_friends}
+
+    def _target_view(self, target):
+        platform, account, user = target_identity(target)
+        return {"platform": platform, "account_id": account or self._bot_qq, "user_id": user}
+
     def _delete_record_locked(self, action, target, session, revision, item_id, version):
         """Admin-only list dismissal; keep dispatch, batch identity and daily usage intact."""
         from .dayplan import day_key, item_version
@@ -198,11 +226,41 @@ class WakeManagement:
         while len(self._submission_results) > 256:
             self._submission_results.pop(next(iter(self._submission_results)))
 
-    async def _management_stream(self, target, group):
-        getter = (
-            self.ctx.chat.get_stream_by_group_id if group else self.ctx.chat.get_stream_by_user_id
-        )
-        result = await getter(target)
+    async def _management_stream(self, target, group, *, session=""):
+        platform, account, user = target_identity(target)
+        account = account or self._bot_qq
+        if platform == "telegram":
+            if group:
+                return None
+            # The user-only getter may choose another bot's first session. List
+            # existing private sessions and require an exact, unique identity.
+            async with asyncio.timeout(2):
+                result = await self.ctx.chat.get_private_streams(platform="telegram")
+            if isinstance(result, dict):
+                result = None if result.get("success") is False else result.get("streams")
+            if not isinstance(result, list) or len(result) > 512:
+                return None
+            matches = [
+                row
+                for row in result
+                if isinstance(row, dict)
+                and row.get("platform") == platform
+                and row.get("account_id") == account
+                and row.get("user_id") == user
+                and row.get("is_group_session") is False
+                and not row.get("group_id")
+                and (not session or row.get("session_id") == session)
+            ]
+            if len(matches) != 1:
+                return None
+            result = matches[0]
+        else:
+            getter = (
+                self.ctx.chat.get_stream_by_group_id
+                if group
+                else self.ctx.chat.get_stream_by_user_id
+            )
+            result = await getter(target)
         if not isinstance(result, dict) or result.get("success") is False:
             return None
         # PluginContext normalizes Host {success, stream} into the stream itself.
@@ -214,11 +272,15 @@ class WakeManagement:
         sid = stream.get("session_id")
         if (
             not text(sid, 128)
-            or stream.get("platform") != "qq"
+            or sid != sid.strip()
+            or (session and sid != session)
+            or ("stream_id" in stream and stream["stream_id"] != sid)
+            or stream.get("platform") != platform
             or stream.get("is_group_session") is not group
-            or str(stream.get("group_id" if group else "user_id") or "") != target
-            or not text(self._bot_qq, 128)
-            or stream.get("account_id") != self._bot_qq
+            or str(stream.get("group_id" if group else "user_id") or "") != user
+            or (not group and stream.get("group_id"))
+            or not text(account, 128)
+            or stream.get("account_id") != account
         ):
             return None
         name = (
@@ -226,7 +288,13 @@ class WakeManagement:
             if group
             else stream.get("user_cardname") or stream.get("user_nickname")
         )
-        return {"session": sid, "name": name[:80] if text(name, 500) else "未命名聊天"}
+        return {
+            "session": sid,
+            "name": name[:80] if text(name, 500) else "未命名聊天",
+            "platform": platform,
+            "account_id": account,
+            "user_id": user,
+        }
 
     async def management_change(
         self,
@@ -259,10 +327,10 @@ class WakeManagement:
                         )
                         self._management_operation = "记录已删除；已入队任务不撤回"
                         return {"success": True, "message": self._management_operation}
-                    if target not in {str(v).strip() for v in self.config.target.allowed_friends}:
+                    if not self._plan_allowed(target):
                         raise ValueError("private_chat_not_authorized")
                     epoch = self._management_epoch
-                    resolved = await self._management_stream(target, False)
+                    resolved = await self._management_stream(target, False, session=session)
                     if self._management_epoch != epoch:
                         raise ValueError("stale_wake_revision")
                     if not resolved or resolved["session"] != session:
@@ -323,13 +391,17 @@ class WakeManagement:
                 running = self._scheduler_task is not None and not self._scheduler_task.done()
                 enabled = self._automatic_enabled() and self._wake_ready and running
                 opening = next_activity(now, cfg.start_time, cfg.end_time)
-                targets = [(True, str(t).strip()) for t in self.config.target.allowed_groups] + [
-                    (False, str(t).strip()) for t in self.config.target.allowed_friends
-                ]
+                targets = (
+                    [(True, str(t).strip()) for t in self.config.target.allowed_groups]
+                    + [(False, str(t).strip()) for t in self.config.target.allowed_friends]
+                    + [(False, target) for target in self._telegram_targets()]
+                )
                 targets = list(dict.fromkeys((g, t) for g, t in targets if text(t, 128)))
                 truncated = len(targets) > 128
                 base, reservations, current_private, current_sessions = [], [], set(), {}
                 for group, target in targets[:128]:
+                    identity = self._target_view(target)
+                    plans_only = identity["platform"] == "telegram"
                     stream = await self._management_stream(target, group)
                     if epoch != self._management_epoch:
                         raise ValueError("配置或生命周期已改变，请刷新")
@@ -339,7 +411,9 @@ class WakeManagement:
                         if group
                         else self.config.target.allowed_friends
                     )
-                    if target not in {str(v).strip() for v in allowed}:
+                    if (not group and not self._plan_allowed(target)) or (
+                        group and target not in {str(v).strip() for v in allowed}
+                    ):
                         continue
                     state = self._states.get((group, target))
                     if state and (not stream or state.stream_id != stream["session"]):
@@ -391,6 +465,8 @@ class WakeManagement:
                         if isolation > now
                         else "等待基础周期检查"
                     )
+                    if plans_only:
+                        reason = "仅计划唤醒" if enabled and stream else reason
                     last = self._submission_results.get((group, target))
                     if not stream or (last and last.get("session") != stream["session"]):
                         last = None
@@ -490,22 +566,30 @@ class WakeManagement:
                         )
                     base.append(
                         {
+                            **identity,
+                            "target": target,
                             "chat": (stream["name"] if stream else "会话未就绪")
                             + ("（群聊）" if group else "（私聊）")
                             + " · "
                             + target,
                             "kind": "群聊" if group else "私聊",
                             "state": reason,
-                            "next": local_time(self._next_regular_at)
+                            "next": "—"
+                            if plans_only
+                            else local_time(self._next_regular_at)
                             if enabled and stream and self._next_regular_at
                             else "正在检查"
                             if enabled and stream
                             else "—",
-                            "rules": cfg.start_time
+                            "rules": "仅单次与重复计划"
+                            if plans_only
+                            else cfg.start_time
                             + "–"
                             + cfg.end_time
                             + f" · {cfg.check_interval}±{cfg.jitter}分钟 · 概率{cfg.probability:g}",
-                            "guard": (
+                            "guard": "仅计划安全间距"
+                            if plans_only
+                            else (
                                 "冷却至 " + local_time(cooldown) if cooldown > now else "冷却已满足"
                             )
                             + (
@@ -536,7 +620,12 @@ class WakeManagement:
                     can_save = enabled and self._wake_ready
                     reservations.append(
                         {
-                            "chat": stream["name"] + " · " + target,
+                            **identity,
+                            "plans_only": plans_only,
+                            "chat": stream["name"]
+                            + (" · TG " + identity["account_id"] if plans_only else " · QQ")
+                            + " · "
+                            + identity["user_id"],
                             "target": target,
                             "session": stream["session"],
                             "revision": wake_revision(
@@ -576,7 +665,9 @@ class WakeManagement:
                             else "—",
                             "last": last_text,
                             "planner_state": planner_state,
-                            "dayplan": get_day(data, target, stream["session"], now),
+                            "dayplan": None
+                            if plans_only
+                            else get_day(data, target, stream["session"], now),
                             "plan_safety_until": local_time(self._target_guard(data, target))
                             if self._target_guard(data, target) > now
                             else "已满足60秒安全间距",
@@ -675,6 +766,7 @@ class WakeManagement:
                             continue
                         cleanup.append(
                             {
+                                **self._target_view(target),
                                 "target": target,
                                 "session": record["session"],
                                 "revision": wake_revision(

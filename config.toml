@@ -1,7 +1,7 @@
 [plugin]
 enabled = false
 config_version = "2.0.0"
-version = "2.9.3"
+version = "2.10.0"
 
 [scheduler]
 enabled = true
@@ -16,6 +16,8 @@ isolation_time = 0
 [target]
 allowed_groups = []
 allowed_friends = ["12345678"]
+telegram_account_id = ""
+allowed_telegram_user_ids = []
 
 [log]
 verbose = true

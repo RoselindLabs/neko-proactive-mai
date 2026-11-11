@@ -28,6 +28,8 @@ from .wake_store import (
     all_singles,
     single_revision,
     selected_single,
+    target_identity,
+    telegram_key,
 )
 from .webui import WakeManagement
 from .time_input import DEFAULT_ZONE, simple_instant, convert_zone
@@ -55,6 +57,7 @@ class ChatStreamState:
     def __init__(self, stream_id: str, target_id: str, *, is_group: bool = False):
         self.stream_id = stream_id
         self.target_id = target_id
+        self.platform, self.account_id, self.user_id = target_identity(target_id)
         self.is_group = is_group
         self.last_proactive_time: float = 0.0
 
@@ -188,6 +191,14 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                     resolved[(False, target_id)] = state
                 self.ctx.logger.warning(f"无法解析私聊: {target_id}")
 
+        for target_id in self._telegram_targets():
+            sid = await self._resolve_session_id(target_id, False)
+            key = (False, target_id)
+            # Plan-only states are in the original map, never the base cycle.
+            state = ChatStreamState(sid or "", target_id)
+            state.last_proactive_time = previous.get(key, 0.0)
+            resolved[key] = state
+
         changed = set(resolved) != set(self._states)
         self._states = resolved
         if changed or not resolved:
@@ -226,8 +237,8 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
 
     @Tool(
         "neko_proactive_wake",
-        description="想稍后继续某个话题时，预约一次醒来思考，可同时保留多条。get查看、add新增、update修改、cancel取消。at按北京时间填10分钟后、21:30、明天09:00或日期时间，限未来1分钟至7天；intent写到时想继续的事。update/cancel须带get返回的item_id和version，只操作选中一条。到时结合最新聊天决定是否开口。",
-        brief_description="想稍后续聊时预约一次醒来思考，可保留多条。get查看、add新增、update修改、cancel取消；at填北京时间10分钟后、21:30、明天09:00或日期时间，未来1分钟至7天；intent写话题。update/cancel带get返回的item_id/version，只改这一条；到时可不发言。",
+        description="单次预约：一次性稍后续聊或回顾，可保留多条。每天或每隔N天等明确周期请用neko_proactive_repeat，不要拆成单次。get查看、add新增、update修改、cancel取消；at填北京时间10分钟后、21:30、明天09:00或日期时间，未来1分钟至7天；intent写话题和依据。update/cancel带get返回的item_id/version，只改这一条。仅当前授权私聊，到时结合最新聊天决定是否开口。",
+        brief_description="单次预约：一次性稍后续聊或回顾，可保留多条。每天或每隔N天等明确周期请用neko_proactive_repeat，不要拆成单次。get查看、add新增、update修改、cancel取消；at填北京时间10分钟后、21:30、明天09:00或日期时间，未来1分钟至7天；intent写话题和依据。update/cancel带get返回的item_id/version，只改这一条。仅当前授权私聊，到时结合最新聊天决定是否开口。",
         detailed_description="HH:MM指今天，已过时刻不顺延。新增不会覆盖其他预约；修改只限未来未尝试项，取消只限待执行项。",
         parameters=[
             ToolParameterInfo(
@@ -252,7 +263,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 required=False,
             ),
         ],
-        platforms=["qq"],
+        platforms=["qq", "telegram"],
         chat_scope="private",
         trusted_context=CONTRACT,
     )
@@ -261,30 +272,12 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
     ):
         try:
             async with self._wake_lock:
-                host = kwargs.get("_host_context")
                 if not self._wake_ready or not self._automatic_enabled():
                     raise ValueError("wake_disabled")
-                if (
-                    not isinstance(host, dict)
-                    or host.get("contract") != CONTRACT
-                    or host.get("platform") != "qq"
-                    or host.get("group_id")
-                    or not text(host.get("user_id"), 128)
-                    or not text(host.get("session_id"), 128)
-                    or host.get("stream_id") != host["session_id"]
-                    or (host.get("account_id") and host["account_id"] != self._bot_qq)
-                ):
+                identity = await self._repeat_identity(kwargs)
+                if not identity:
                     raise ValueError("trusted_private_context_required")
-                target, session = host["user_id"], host["session_id"]
-                state = ChatStreamState(session, target)
-                resolved = await self._resolve_session_id(target, False)
-                if (
-                    not self._wake_ready
-                    or not self._automatic_enabled()
-                    or not self._is_authorized(state, target)
-                    or resolved != session
-                ):
-                    raise ValueError("private_chat_not_authorized")
+                target, session = identity
                 row = self._change_wake_locked(
                     action,
                     target,
@@ -331,8 +324,8 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
 
     @Tool(
         "neko_proactive_repeat",
-        description="想定期回顾或继续某个话题时，设置重复醒来思考。get查看、set设置/修改、pause暂停、resume继续、delete删除。set填interval_minutes（120代表每2小时）或local_time（21:00代表每天北京时间21点），二选一；intent写想继续的事。已有计划可只改intent；到时结合最新聊天决定是否开口。",
-        brief_description="想保持持续联系或定期回顾话题时设置重复醒来思考：get查看、set设置/修改、pause暂停、resume继续、delete删除。interval_minutes=120表示每2小时，或local_time=21:00表示每天北京时间21点，二选一；intent写话题，已有计划可只改intent。到时可不发言。",
+        description="重复预约：每天、每隔N天或固定间隔续聊/回顾，当前授权私聊只保留一份重复计划。get查看、set设置/修改、pause暂停、resume继续、delete删除。interval_minutes为1～10080分钟：5表示每5分钟、120每2小时、2880每隔2天；或local_time=21:00表示每天北京时间21点，二选一。intent写话题和依据，已有计划可只改intent；不支持指定星期或每月。一次性预约请用neko_proactive_wake。到时结合最新聊天决定是否开口。",
+        brief_description="重复预约：每天、每隔N天或固定间隔续聊/回顾，当前授权私聊只保留一份重复计划。get查看、set设置/修改、pause暂停、resume继续、delete删除。interval_minutes为1～10080分钟：5表示每5分钟、120每2小时、2880每隔2天；或local_time=21:00表示每天北京时间21点，二选一。intent写话题和依据，已有计划可只改intent；不支持指定星期或每月。一次性预约请用neko_proactive_wake。到时结合最新聊天决定是否开口。",
         parameters=[
             ToolParameterInfo(
                 name="action",
@@ -341,7 +334,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
             ),
             ToolParameterInfo(
                 name="interval_minutes",
-                description="interval间隔分钟，1～10080；例如每2小时填120",
+                description="间隔1～10080分钟：每5分钟填5，每2小时填120，每隔2天填2880",
                 param_type=ToolParamType.INTEGER,
                 required=False,
             ),
@@ -356,7 +349,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 required=False,
             ),
         ],
-        platforms=["qq"],
+        platforms=["qq", "telegram"],
         chat_scope="private",
         trusted_context=CONTRACT,
     )
@@ -427,7 +420,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
             or not self._automatic_enabled()
             or not isinstance(host, dict)
             or host.get("contract") != CONTRACT
-            or host.get("platform") != "qq"
+            or host.get("platform") not in ("qq", "telegram")
             or host.get("group_id")
         ):
             return None
@@ -436,16 +429,35 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
             not text(target, 128)
             or not text(session, 128)
             or host.get("stream_id") != session
-            or (host.get("account_id") and host["account_id"] != self._bot_qq)
+            or target != target.strip()
+            or session != session.strip()
         ):
             return None
-        resolved = await self._resolve_session_id(target, False)
+        account = self._bot_qq
+        if host["platform"] == "telegram":
+            account = self.config.target.telegram_account_id
+            try:
+                target = telegram_key(account, target)
+            except ValueError:
+                return None
+        elif target.startswith("telegram:"):
+            return None
+        if host.get("account_id") and host["account_id"] != account:
+            return None
+        epoch = self._management_epoch
+        try:
+            async with asyncio.timeout(7):
+                actual = await self._management_stream(target, False, session=session)
+        except Exception:
+            return None
         state = ChatStreamState(session, target)
         if (
             not self._wake_ready
             or not self._automatic_enabled()
             or not self._is_authorized(state, target)
-            or resolved != session
+            or epoch != self._management_epoch
+            or not actual
+            or actual["session"] != session
         ):
             return None
         return target, session
@@ -493,6 +505,9 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
         try:
             async with self._wake_lock:
                 epoch = self._management_epoch
+                host = kwargs.get("_host_context")
+                if not isinstance(host, dict) or host.get("platform") != "qq":
+                    raise ValueError("private_chat_not_authorized")
                 identity = await self._repeat_identity(kwargs)
                 if not identity:
                     raise ValueError("private_chat_not_authorized")
@@ -571,8 +586,10 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
             raise ValueError("wake_disabled")
         if self._wake_inflight == target and action not in ("get", "repeat_get", "day_get"):
             raise ValueError("wake_submission_inflight")
-        if target not in {str(value).strip() for value in self.config.target.allowed_friends}:
+        if not self._plan_allowed(target):
             raise ValueError("private_chat_not_authorized")
+        if action.startswith("day_") and target_identity(target)[0] != "qq":
+            raise ValueError("telegram_dayplan_not_supported")
         store = self._get_wakes()
         data = store.read()
         row = data["slots"].get(target)
@@ -1013,7 +1030,9 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                         reason=reason,
                         metadata={
                             "source": "lonelymai",
-                            "target_id": target,
+                            "target_id": state.user_id,
+                            "platform": state.platform,
+                            "account_id": state.account_id or self._bot_qq,
                             "chat_kind": "private",
                             "neko_wake_id": wake_id,
                         },
@@ -1120,7 +1139,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 regular = time.monotonic() >= next_regular
                 self._scheduler_phase = "checking"
                 for state in list(self._states.values()) if regular else []:
-                    if not state.stream_id:
+                    if not state.stream_id or state.platform != "qq":
                         continue
                     target_id = state.target_id
                     allowed = (
@@ -1138,7 +1157,11 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
 
                 if regular:
                     next_regular = time.monotonic() + self._next_sleep_seconds()
-                    self._next_regular_at = time.time() + max(0, next_regular - time.monotonic())
+                    self._next_regular_at = (
+                        time.time() + max(0, next_regular - time.monotonic())
+                        if any(s.platform == "qq" and s.stream_id for s in self._states.values())
+                        else None
+                    )
                 await self._run_wakes()
                 sleep_seconds = min(max(1, next_regular - time.monotonic()), self._wake_delay())
                 self._scheduler_phase = "waiting"
@@ -1159,6 +1182,8 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 await asyncio.sleep(60)
 
     async def _check_and_trigger(self, state: ChatStreamState, target_id: str) -> None:
+        if state.platform != "qq":
+            return
         if not state.is_group:
             async with self._wake_lock:
                 data = self._get_wakes().read()
@@ -1191,6 +1216,8 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
         )
 
     async def _check_default_and_trigger(self, state: ChatStreamState, target_id: str) -> None:
+        if state.platform != "qq":
+            return
         cfg = self.config
         now = datetime.now()
         self._note_check(state, "checking")
@@ -1319,7 +1346,11 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                             (s for s in self._states.values() if s.stream_id == record["scope"]),
                             None,
                         )
-                        if state is None or not self._is_authorized(state, state.target_id):
+                        if (
+                            state is None
+                            or state.platform != "qq"
+                            or not self._is_authorized(state, state.target_id)
+                        ):
                             continue
                         result = await self._life.call(
                             "prompt",
@@ -1366,7 +1397,11 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                             (s for s in self._states.values() if s.stream_id == record["scope"]),
                             None,
                         )
-                        if state is None or not self._is_authorized(state, state.target_id):
+                        if (
+                            state is None
+                            or state.platform != "qq"
+                            or not self._is_authorized(state, state.target_id)
+                        ):
                             continue
                         result = await bridge.call(
                             "prompt",
@@ -1527,6 +1562,14 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
 
     def _is_authorized(self, state: ChatStreamState, target_id: str) -> bool:
         # Cached states preserve cooldowns, but are never an authorization source.
+        if state.platform == "telegram":
+            return (
+                self.config.plugin.enabled
+                and not state.is_group
+                and bool(state.stream_id)
+                and state.target_id == target_id
+                and self._plan_allowed(target_id)
+            )
         allowed = (
             self.config.target.allowed_groups
             if state.is_group
@@ -1544,7 +1587,11 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
 
         群聊和私聊各选自己的意图，空白时使用各自默认。
         """
-        if not self._wake_ready or not self._is_authorized(state, target_id):
+        if (
+            state.platform != "qq"
+            or not self._wake_ready
+            or not self._is_authorized(state, target_id)
+        ):
             self._skip(target_id, "插件已禁用或目标已撤权")
             return False
         candidate = None
@@ -1700,7 +1747,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
             return False, "无法获取当前会话 ID", True
 
         state = next((st for st in self._states.values() if st.stream_id == stream_id), None)
-        if state is None:
+        if state is None or state.platform != "qq":
             return False, "当前会话未在白名单中", True
 
         success = await self._do_proactive_chat(state, state.target_id)

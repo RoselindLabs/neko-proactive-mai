@@ -25,7 +25,7 @@ PRIVATE_PROACTIVE_INTENT = (
 class PluginSection(PluginConfigBase):
     enabled: bool = Field(default=True, description="是否启用插件")
     config_version: str = Field(default="2.0.0", description="配置文件版本号")
-    version: str = Field(default="2.9.3", description="插件版本，由维护流程更新，无需手改")
+    version: str = Field(default="2.10.0", description="插件版本，由维护流程更新，无需手改")
 
 
 class SchedulerSection(PluginConfigBase):
@@ -74,6 +74,13 @@ class TargetSection(PluginConfigBase):
     allowed_friends: List[str] = Field(
         default_factory=list,
         description="本插件可主动联系的好友QQ号；不自动授予B站或其他插件私聊权限",
+    )
+    telegram_account_id: str = Field(
+        default="", description="Telegram机器人数字账号ID；与独立私聊名单一起授权单次/重复计划"
+    )
+    allowed_telegram_user_ids: List[str] = Field(
+        default_factory=list,
+        description="Telegram私聊用户数字ID，默认空；仅授权单次/重复计划，不启用基础主动或群/话题日程",
     )
 
 
