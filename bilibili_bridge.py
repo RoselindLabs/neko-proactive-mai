@@ -4,8 +4,8 @@ from .life_bridge import LifeBridge
 
 
 class BilibiliBridge(LifeBridge):
-    terminal_statuses = {"shown", "released"}
-    accepted_statuses = {"shown", "released", "unknown", "submitted", "prepared"}
+    terminal_statuses = {"shown", "released", "unavailable"}
+    accepted_statuses = {"shown", "released", "unavailable", "unknown", "submitted", "prepared"}
 
     def __init__(self, context):
         super().__init__(

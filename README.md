@@ -2,6 +2,10 @@
 
 MaiBot 主动聊天调度插件，插件 ID 为 `neko.proactive`。
 
+## 2.10.1 · B站素材不可用终态收口
+
+B站服务端确认素材缺失并返回`unavailable`后，主动侧将其持久化为终态，后续flush不再轮询该记录；沿用领取候选时按创建时间满7天回收本地已知终态的规则，避免永久占用128条outbox。B站侧永久消费墓碑和已用分享机会保留，不补发、不退还机会；`unknown`及未识别状态仍保守保留。Life共用策略、QQ配置、TG仅显式计划/默认空账号与名单、v4/v5账本合同均保持，无数据迁移或主动清账。
+
 ## 2.10.0 · Telegram私聊计划与工具检索
 
 - 独立的`target.telegram_account_id`（机器人数字账号ID）和`target.allowed_telegram_user_ids`（用户数字ID列表）均默认空。两项显式配置后，仅该账号已有的TG私聊可用单次、重复计划；QQ同号不会继承授权或计划。机器人账号不是用户名或Token；用户ID不接受`@名字`、负数、前导零或群号。
@@ -174,7 +178,7 @@ Life已退役时保持`life.enabled=false`，普通群私意图、概率、时�
 [plugin]
 enabled = false
 config_version = "2.0.0"
-version = "2.10.0"
+version = "2.10.1"
 
 [scheduler]
 enabled = true

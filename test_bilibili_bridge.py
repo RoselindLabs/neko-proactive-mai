@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from maibot_sdk.context import PluginContext
+from maibot_sdk.context import PluginContext, PluginPaths
 import test_intent as intents
 from prompt_visibility import pending_offers, filter_request, inject_bilibili_offers, EPHEMERAL
 import test_prompt_visibility as visibility
@@ -122,8 +122,6 @@ class BilibiliIntentTests(unittest.IsolatedAsyncioTestCase):
                 calls.append(payload)
                 return {"success": True, "result": {"success": True, "candidate": None}}
 
-            from maibot_sdk.context import PluginPaths
-
             ctx = PluginContext(
                 "neko.proactive",
                 rpc_call=rpc,
@@ -139,6 +137,78 @@ class BilibiliIntentTests(unittest.IsolatedAsyncioTestCase):
 
 class BilibiliIOTests(unittest.IsolatedAsyncioTestCase):
     setUp = wakes.WakeTests.setUp
+
+    async def test_sdk_unavailable_stops_polling_and_expires_without_reclaiming_unknown(self):
+        module = importlib.import_module("wake_test.bilibili_bridge")
+        clock = importlib.import_module("wake_test.life_bridge").time
+        directory = Path(self.directory.name)
+        key = directory / "bilibili-client.json"
+        key.write_text(json.dumps({"neko.proactive": "ab" * 32}), encoding="utf-8")
+        key.chmod(0o600)
+        calls = []
+        candidate_id = "a" * 32
+        unknown_status = "unknown"
+
+        async def rpc(method, plugin_id, payload):
+            self.assertEqual(payload["args"]["api_name"], "local.bilibili-autopilot.discovery_v1")
+            packet = payload["args"]["args"]["packet"]
+            operation, body = packet["operation"], packet["body"]
+            calls.append((operation, body))
+            result = {"success": True}
+            if operation == "claim":
+                result["candidate"] = {
+                    "receipt_id": candidate_id,
+                    "summary": "synthetic",
+                    "protocol": 2,
+                }
+            elif operation == "status":
+                result["status"] = (
+                    "unavailable" if body["receipt_id"] == "a" * 32 else unknown_status
+                )
+            else:
+                self.assertEqual(operation, "receipt")
+            return {"success": True, "result": result}
+
+        ctx = PluginContext(
+            "neko.proactive",
+            rpc_call=rpc,
+            paths=PluginPaths(directory, directory / "runtime"),
+        )
+        bridge = module.BilibiliBridge(ctx)
+        with patch.object(clock, "time", return_value=wakes.NOW) as now:
+            await bridge.claim("chat")
+            await bridge.update(candidate_id, "submitted", "proactive:neko.proactive:1793505600000")
+            candidate_id = "b" * 32
+            await bridge.claim("chat")
+            await bridge.update(candidate_id, "unknown")
+            await bridge.flush()
+            terminal = bridge._read()["a" * 32]
+            uncertain = bridge._read()["b" * 32]
+            self.assertEqual(terminal["status"], "unavailable")
+            self.assertEqual(uncertain["status"], "unknown")
+
+            bridge = module.BilibiliBridge(ctx)
+            calls.clear()
+            unknown_status = "future_unrecognized_status"
+            await bridge.flush()
+            self.assertEqual(calls, [("status", {"session_id": "chat", "receipt_id": "b" * 32})])
+            self.assertEqual(bridge._read()["a" * 32], terminal)
+            self.assertEqual(bridge._read()["b" * 32], uncertain)
+            await bridge.update("a" * 32, "unknown")
+            self.assertEqual(bridge._read()["a" * 32], terminal)
+
+            now.return_value = wakes.NOW + 7 * 86400 - 1
+            candidate_id = "a" * 32
+            before = bridge.path.read_bytes()
+            with self.assertRaisesRegex(ValueError, "duplicate_receipt"):
+                await bridge.claim("chat")
+            self.assertEqual(bridge.path.read_bytes(), before)
+
+            now.return_value += 1
+            candidate_id = "c" * 32
+            await bridge.claim("chat")
+            self.assertEqual(set(bridge._read()), {"b" * 32, "c" * 32})
+            self.assertEqual(bridge._read()["b" * 32], uncertain)
 
     def bridge(self):
         bridge = importlib.import_module("wake_test.bilibili_bridge").BilibiliBridge(self.bot.ctx)
