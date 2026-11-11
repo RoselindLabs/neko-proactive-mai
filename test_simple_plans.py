@@ -70,7 +70,9 @@ class SimpleToolTests(unittest.IsolatedAsyncioTestCase):
         }
         for name, names in expected.items():
             self.assertEqual({p["name"] for p in components[name]["parameters"]}, names)
-            self.assertIn("北京时间", components[name]["description"])
+            time_parameter = "local_time" if name == "neko_proactive_repeat" else "at"
+            parameters = {p["name"]: p for p in components[name]["parameters"]}
+            self.assertIn("北京时间", parameters[time_parameter]["description"])
         self.assertIn("不能设置明天", components["neko_proactive_dayplan"]["description"])
 
     async def test_model_simple_inputs_create_without_timezone_or_kind(self):
