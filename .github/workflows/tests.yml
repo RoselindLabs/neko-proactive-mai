@@ -47,7 +47,8 @@ jobs:
     name: runtime (${{ matrix.case }})
     needs: changes
     if: needs.changes.outputs.runtime == 'true'
-    runs-on: ${{ matrix.os }}
+    # Python 3.14.4 has no Ubuntu 26.04 package during the latest-label migration.
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'ubuntu-24.04' || matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false

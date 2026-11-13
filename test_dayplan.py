@@ -502,6 +502,8 @@ class DayplanTests(unittest.IsolatedAsyncioTestCase):
                     "cancel", item_id=first["item_id"], version=first["version"]
                 )
                 self.assertFalse(response["success"])
+                self.assertEqual(response["error"], "trusted_private_context_required")
+                self.assertNotIn("目标不在", response["message"])
                 self.assertEqual(before, self.bot._get_wakes().path.read_bytes())
         self.responses = original
         underlying = self.context._rpc_call
@@ -530,7 +532,24 @@ class DayplanTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plan()["items"][first["item_id"]]["due"], NOW + 336)
         selected = await self.selected()
         fresh = selected["dayplan"]["items"][0]
-        wall = datetime.fromtimestamp(NOW + 336, timezone.utc).strftime("%Y-%m-%dT%H:%M")
+        self.assertTrue(fresh["can_edit"])
+        wall = datetime.fromtimestamp(NOW + 336, day.zone_info("Asia/Shanghai")).strftime("%H:%M")
+        raw = self.bot._get_wakes().path.read_bytes()
+        for fields in (
+            {"item_id": "missing", "version": fresh["version"], "when": wall},
+            {"item_id": fresh["item_id"], "version": first["version"], "when": wall},
+            {
+                "item_id": fresh["item_id"],
+                "version": fresh["version"],
+                "when": datetime.fromtimestamp(NOW + 360, day.zone_info("Asia/Shanghai")).strftime(
+                    "%H:%M"
+                ),
+            },
+        ):
+            with self.subTest(fields=fields):
+                result = await self.bot.wake_edit("day_update", **self.identity(selected), **fields)
+                self.assertFalse(result["success"], result)
+                self.assertEqual(self.bot._get_wakes().path.read_bytes(), raw)
         result = await self.bot.wake_edit(
             "day_update",
             **self.identity(selected),
@@ -542,7 +561,22 @@ class DayplanTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(result["success"], result)
         self.assertEqual(self.plan()["items"][first["item_id"]]["due"], NOW + 336)
+        self.assertEqual(self.plan()["timezone"], "UTC")
+        self.assertEqual(self.plan()["items"][first["item_id"]]["at"], first["at"])
         self.clock_mock.return_value = NOW + 336
+        selected = await self.selected()
+        fresh = selected["dayplan"]["items"][0]
+        raw = self.bot._get_wakes().path.read_bytes()
+        result = await self.bot.wake_edit(
+            "day_update",
+            **self.identity(selected),
+            item_id=fresh["item_id"],
+            version=fresh["version"],
+            when=wall,
+            intent="已经到点不能借预填保留",
+        )
+        self.assertFalse(result["success"], result)
+        self.assertEqual(raw, self.bot._get_wakes().path.read_bytes())
         await self.bot._run_wakes()
         fresh = (await self.tool())["dayplan"]["items"][0]
         raw = self.bot._get_wakes().path.read_bytes()
@@ -558,6 +592,43 @@ class DayplanTests(unittest.IsolatedAsyncioTestCase):
             )["success"]
         )
         self.assertEqual(raw, self.bot._get_wakes().path.read_bytes())
+
+    async def test_snapshot_uses_latest_day_attempt_over_active_or_retired_repeat_after_reload(
+        self,
+    ):
+        from wake_test.webui import local_time
+
+        result = await self.bot.private_repeat(
+            "set", interval_minutes=60, intent="较早的重复轮次", _host_context=self.host
+        )
+        self.assertTrue(result["success"], result)
+        await self.add(7200, "较晚的当天事项")
+        self.clock_mock.return_value = NOW + 3600
+        await self.bot._run_wakes()
+        self.clock_mock.return_value = NOW + 7200
+        await self.bot._run_wakes()
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.data()["repeats"]["friend"]["last"]["attempted"], NOW + 3600)
+        self.bot._submission_results.clear()  # Same persistent projection after a reload.
+        for retired in (False, True):
+            with self.subTest(retired=retired):
+                if retired:
+                    result = await self.bot.private_repeat("delete", _host_context=self.host)
+                    self.assertTrue(result["success"], result)
+                    self.assertEqual(
+                        self.data()["slots"]["friend"]["repeat_last"]["attempted"], NOW + 3600
+                    )
+                raw = self.bot._get_wakes().path.read_bytes()
+                snapshot = await self.bot.wake_overview()
+                private = next(row for row in snapshot["base"] if row["target"] == "friend")
+                self.assertEqual(private["last"], local_time(NOW + 7200) + " · 宿主已入队")
+                self.assertEqual(raw, self.bot._get_wakes().path.read_bytes())
+        self.bot._record_submission(
+            self.bot._states[(False, "friend")], "rejected", "regular", NOW + 7300
+        )
+        snapshot = await self.bot.wake_overview()
+        private = next(row for row in snapshot["base"] if row["target"] == "friend")
+        self.assertEqual(private["last"], local_time(NOW + 7300) + " · 宿主已拒绝")
 
     async def test_unknown_batches_retained_across_days_and_capacity_refuses_without_discard(self):
         self.result = None
@@ -602,6 +673,10 @@ class DayplanTests(unittest.IsolatedAsyncioTestCase):
             self.bot._get_wakes().path.write_bytes(raw)
             with self.assertRaises(ValueError):
                 self.bot._get_wakes().recover(NOW + 400)
+            response = await self.tool()
+            self.assertFalse(response["success"])
+            self.assertIn("管理员核查", response["content"])
+            self.assertNotIn("北京时间", response["content"])
             self.assertEqual(raw, self.bot._get_wakes().path.read_bytes())
         self.bot._get_wakes().path.write_bytes(json.dumps(original).encode())
         raw = self.bot._get_wakes().path.read_bytes()

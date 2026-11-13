@@ -202,11 +202,11 @@ def change_plan(data, target, action, now):
     plan = data.get("repeats", {}).get(target)
     if not plan:
         raise ValueError("repeat_not_found")
+    if plan["state"] == "revoked" and action in ("repeat_pause", "repeat_resume"):
+        raise ValueError("repeat_revoked")
     if action == "repeat_pause":
         plan.update(enabled=False, state="paused")
     elif action == "repeat_resume":
-        if plan["state"] == "revoked":
-            raise ValueError("private_chat_not_authorized")
         if not plan["enabled"]:
             plan.update(enabled=True, state="active")
             plan["current"] = occurrence(plan, next_due(plan, now))

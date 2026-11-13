@@ -114,3 +114,41 @@ class RepeatManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(snapshot["reservations"][0]["repeat"])
         self.assertNotIn("旧会话私有意图", str(snapshot))
         self.assertEqual(self.bot._get_wakes().path.read_bytes(), before)
+
+    async def test_reauthorized_revoked_plan_rejects_pause_resume_without_corrupting_index(self):
+        await self.bot._init_target_streams()
+        self.assertTrue(
+            (
+                await self.edit(
+                    "repeat_set",
+                    interval_minutes=120,
+                    kind="interval",
+                    timezone="UTC",
+                    intent="依据",
+                )
+            )["success"]
+        )
+        self.bot.config.target.allowed_friends = []
+        await self.bot._run_wakes()
+        store = self.bot._get_wakes()
+        revoked = store.read()["repeats"]["friend"]
+        self.assertEqual(revoked["state"], "revoked")
+        self.assertEqual(revoked["current"]["status"], "revoked")
+        self.bot.config.target.allowed_friends = ["friend"]
+        raw = store.path.read_bytes()
+        self.bot._wake_event.clear()
+        for action in ("pause", "resume"):
+            with self.subTest(action=action):
+                result = await self.edit("repeat_" + action)
+                self.assertFalse(result["success"])
+                self.assertIn("已撤权失效", result["message"])
+                result = await self.bot.private_repeat(action, _host_context=self.host)
+                self.assertEqual(result["error"], "repeat_revoked")
+                self.assertEqual(store.path.read_bytes(), raw)
+                self.assertFalse(self.bot._wake_event.is_set())
+                self.assertEqual(store.read()["repeats"]["friend"], revoked)
+                store.recover(NOW + 86400)
+                self.assertEqual(store.path.read_bytes(), raw)
+                self.assertTrue(
+                    (await self.bot.private_repeat("get", _host_context=self.host))["success"]
+                )

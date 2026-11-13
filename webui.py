@@ -69,7 +69,7 @@ ERRORS = {
     "day_unknown_retained": "保留的未知日程已达上限，未清除或重放旧事项",
     "day_full": "今天最多6项，已取消和已尝试项仍计入额度",
     "day_item_not_found": "没有找到当前私聊的这项日程",
-    "day_future_only": "只能修改或删除尚未到点、从未提交的今天事项",
+    "day_future_only": "只能修改或取消尚未到点、从未提交的今天事项",
     "record_not_found": "这条记录已改变或已删除，请刷新列表",
     "record_future_only": "待执行事项请先取消，只有已结束的记录可以删除",
     "wake_submission_inflight": "该私聊正在提交Host，稍后刷新核对；不会自动重试",
@@ -77,9 +77,11 @@ ERRORS = {
     "invalid_repeat_interval": "间隔须为1～10080分钟",
     "invalid_repeat_clock": "每天时刻须为HH:MM，不能同时填写间隔或首次时刻",
     "repeat_not_found": "当前没有重复计划",
+    "repeat_revoked": "这份重复计划已撤权失效，不能暂停或恢复；保留原记录，不会重新执行",
     "daily_time_unavailable": "未来当地时刻不可用",
     "wake_disabled": "插件或自动调度已关闭，未保存新预约；仍可取消待执行预约",
     "private_chat_not_authorized": "目标不在当前私聊授权名单中",
+    "trusted_private_context_required": "当前无法核实可用的已授权私聊上下文；可能未就绪、调度关闭或会话查询异常，请管理员核查",
     "session_changed": "真实会话已改变，请刷新后重新选择",
     "stale_wake_revision": "预约已被模型、调度器或其他管理员修改，请刷新后重新选择",
     "invalid_time_or_intent": "填写带偏移的绝对时刻、IANA时区及1～240字符意图",
@@ -89,6 +91,22 @@ ERRORS = {
     "time_must_be_60s_to_7d_in_future": "新时刻必须在未来60秒至7天内",
     "wake_index_full": "预约存储已满，可修改已有目标；未清除未知记录",
     "invalid_management_request": "管理参数无效，请刷新后重新选择目标",
+    "add_identity_not_allowed": "新增add不填item_id/version；修改已有安排请先get，再按完整ID和当前version执行update",
+    **{
+        code: "预约索引不可用，请管理员核查存储与记录完整性；保留原记录，不要清账或重建计划补发"
+        for code in (
+            "unsafe_wake_index",
+            "wake_index_too_large",
+            "invalid_wake_index",
+            "invalid_wake_slot",
+            "invalid_wake_record",
+            "invalid_repeat_index",
+            "invalid_repeat_record",
+            "invalid_day_index",
+            "invalid_day_record",
+            "ambiguous_legacy_target",
+        )
+    },
 }
 
 
@@ -136,11 +154,11 @@ def tool_result(kind, result, *, selected=None):
             "wake_disabled": "插件或调度未就绪/关闭；当前工具未执行，请让管理员核查开关。",
             "wake_storage_unavailable": "存储不可用；请让管理员核查，勿通过新建计划补发。",
         }
-        message = hints.get(code, result["message"])
+        message = hints.get(code, ERRORS.get(code, result["message"]))
         return {
             **result,
             "message": message,
-            "content": message + " unknown不代表未发送，不能为补发重加计划。",
+            "content": message,
         }
 
     view = {"next_at": result.get("next_at")}
@@ -199,19 +217,32 @@ def tool_result(kind, result, *, selected=None):
                 "列表已截断；未展示不等于不存在。当前工具没有翻页参数，请管理员在主动唤醒管理页查看剩余项；不要猜ID/version或重复新增。"
             )
 
-    guidance = (
-        "到时只唤醒Planner结合最新聊天判断，可以沉默；不是可靠闹钟或送达承诺。"
-        "scheduled=待执行；blocked=等待条件；submitted=仅Host已入队，不是已回复/送达；"
-        "unknown=提交结果未知，不能认定未发送或为补发重加；rejected=Host明确拒绝；"
-        "cancelled=已取消，不撤回已入队任务；expired=已错过、不补播；revoked=授权/会话失效。"
-        "next_at为下次计划时刻，不保证实际执行时刻；null表示没有可执行的下一项。"
-    )
-    if kind == "repeat":
-        guidance += "重复计划先get再set修改，省略字段保留；编辑暂停计划不会恢复，resume才继续。last是历史轮次，不是待执行项；重复工具没有version/CAS参数。"
-    else:
-        guidance += (
-            "已有安排先get后按item_id/version修改，update省略at/intent保留原值；不要每轮新增。"
-        )
+    def visible_statuses(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key in ("status", "current_status", "state") and isinstance(child, str):
+                    yield child
+                else:
+                    yield from visible_statuses(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from visible_statuses(child)
+
+    statuses = set(visible_statuses(view))
+    meanings = {
+        "scheduled": "scheduled=待执行",
+        "blocked": "blocked=等待条件",
+        "submitted": "submitted=仅Host已入队，不是已回复/送达",
+        "unknown": "unknown=提交结果未知，本次不会因等待或重载而重放；不能认定未发送或为补发重加",
+        "rejected": "rejected=Host明确拒绝",
+        "cancelled": "cancelled=已取消，不撤回已入队任务",
+        "expired": "expired=已错过、不补播",
+        "revoked": "revoked=授权/会话失效",
+    }
+    guidance = "这是计划状态，不是消息送达凭证；到时可沉默。"
+    relevant = [meaning for status, meaning in meanings.items() if status in statuses]
+    if relevant:
+        guidance += " " + "；".join(relevant) + "。"
     return {
         **result,
         "content": result["message"]
@@ -669,30 +700,6 @@ class WakeManagement:
                             else "Host结果未知，不自动重放"
                             if latest_execution["status"] == "unknown"
                             else STATUSES.get(latest_execution["status"], "等待下一轮")
-                        )
-                    if (
-                        plan
-                        and plan["last"]
-                        and plan["last"]["attempted"]
-                        and (not last or plan["last"]["attempted"] >= last["at"])
-                        and (not row or plan["last"]["attempted"] >= row["attempted"])
-                    ):
-                        previous = plan["last"]
-                        last_text = (
-                            local_time(previous["attempted"]) + " · " + STATUSES[previous["status"]]
-                        )
-                    retired = row.get("repeat_last") if row else None
-                    if (
-                        retired
-                        and (not last or retired["attempted"] >= last["at"])
-                        and (
-                            not plan
-                            or not plan["last"]
-                            or retired["attempted"] >= plan["last"]["attempted"]
-                        )
-                    ):
-                        last_text = (
-                            local_time(retired["attempted"]) + " · " + STATUSES[retired["status"]]
                         )
                     base.append(
                         {

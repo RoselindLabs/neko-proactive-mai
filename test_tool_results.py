@@ -18,7 +18,6 @@ class VisibleResultTests(unittest.IsolatedAsyncioTestCase):
         text = self.content(result)
         self.assertTrue(text)
         self.assertLessEqual(len(text), 14000)
-        self.assertIn("unknown", text)
         if result["success"]:
             self.assertNotEqual(text, result["message"])
             view = json.loads(text.split("\n")[1])
@@ -39,7 +38,10 @@ class VisibleResultTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(kind=kind):
                 _, empty = await self.call(kind)
                 self.assertEqual(empty["items"], [])
-                _, added = await self.call(kind, "add", at=at, intent="原话题依据")
+                result, added = await self.call(kind, "add", at=at, intent="原话题依据")
+                self.assertNotIn("unknown", self.content(result))
+                self.assertNotIn("submitted=", self.content(result))
+                self.assertNotIn("先get", self.content(result))
                 selected = added["selected"]
                 self.assertEqual(selected["intent"], "原话题依据")
                 self.assertTrue(selected["can_update"])
@@ -56,9 +58,11 @@ class VisibleResultTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("不要改为add", error)
                 _, listed = await self.call(kind)
                 identity = {k: listed["items"][0][k] for k in ("item_id", "version")}
-                _, cancelled = await self.call(kind, "cancel", **identity)
+                result, cancelled = await self.call(kind, "cancel", **identity)
                 self.assertEqual(cancelled["selected"]["status"], "cancelled")
                 self.assertIsNone(cancelled["next_at"])
+                self.assertIn("已取消", result["message"])
+                self.assertNotIn("到点再判断", result["message"])
 
     async def test_repeat_controls_and_history_are_not_delivery(self):
         _, empty = await self.call("repeat")
@@ -104,6 +108,16 @@ class VisibleResultTests(unittest.IsolatedAsyncioTestCase):
             ("wake", dict(action="update", intent="缺ID"), "item_id"),
             ("dayplan", dict(action="cancel"), "item_id"),
             (
+                "wake",
+                dict(action="add", at="10分钟后", intent="依据", item_id="old"),
+                "新增add不填",
+            ),
+            (
+                "dayplan",
+                dict(action="add", at="23:00", intent="依据", version="old"),
+                "新增add不填",
+            ),
+            (
                 "repeat",
                 dict(action="set", interval_minutes=5, local_time="21:00", intent="冲突"),
                 "二选一",
@@ -115,6 +129,7 @@ class VisibleResultTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(expected, text)
                 self.assertNotIn("IANA", text)
                 self.assertNotIn("带偏移", text)
+                self.assertNotIn("unknown", text)
 
     async def test_many_items_keep_mutation_target_and_report_truncation(self):
         for minute in range(1, 27):

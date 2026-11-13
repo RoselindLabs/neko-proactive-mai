@@ -32,7 +32,7 @@ from .wake_store import (
     telegram_key,
 )
 from .webui import WakeManagement
-from .time_input import DEFAULT_ZONE, simple_instant, convert_zone
+from .time_input import DEFAULT_ZONE, simple_instant
 
 
 # ==================== 工具函数 ====================
@@ -256,11 +256,13 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 required=False,
             ),
             ToolParameterInfo(
-                name="item_id", description="get返回的预约ID，update/cancel必填", required=False
+                name="item_id",
+                description="get返回的完整预约ID，update/cancel必填；add不填",
+                required=False,
             ),
             ToolParameterInfo(
                 name="version",
-                description="get返回的该条预约版本，update/cancel必填",
+                description="get返回的该条预约版本，update/cancel必填；add不填",
                 required=False,
             ),
         ],
@@ -517,12 +519,12 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
             ),
             ToolParameterInfo(
                 name="item_id",
-                description="get返回的不透明事项ID，update/cancel必填",
+                description="get返回的完整事项ID，update/cancel必填；add不填",
                 required=False,
             ),
             ToolParameterInfo(
                 name="version",
-                description="该item_id当前版本，update/cancel必填；变化后重新get",
+                description="该item_id当前版本，update/cancel必填；变化后重新get；add不填",
                 required=False,
             ),
         ],
@@ -545,7 +547,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                     raise ValueError("private_chat_not_authorized")
                 identity = await self._repeat_identity(kwargs)
                 if not identity:
-                    raise ValueError("private_chat_not_authorized")
+                    raise ValueError("trusted_private_context_required")
                 target, session = identity
                 actual = await self._management_stream(target, False)
                 state = ChatStreamState(session, target)
@@ -557,7 +559,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                     or not self._automatic_enabled()
                     or not self._is_authorized(state, target)
                 ):
-                    raise ValueError("private_chat_not_authorized")
+                    raise ValueError("trusted_private_context_required")
                 if action == "get":
                     result = get_day(
                         self._get_wakes().read(),
@@ -588,9 +590,12 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                     "dayplan",
                     {
                         "success": True,
-                        "message": "当天事项已更新；只是计划，到点再判断"
-                        if action != "get"
-                        else "今天日程，留空也正常",
+                        "message": {
+                            "get": "今天日程，留空也正常",
+                            "add": "当天事项已添加",
+                            "update": "当天事项已修改",
+                            "cancel": "当天事项已取消",
+                        }[action],
                         "dayplan": result,
                     },
                     selected=selected,
@@ -650,16 +655,12 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
         if action.startswith("day_"):
             from .dayplan import change_day
 
-            if simple or (
+            simple_day = simple or (
                 isinstance((day_fields or {}).get("at"), str) and len(day_fields["at"]) == 5
-            ):
+            )
+            if simple_day:
                 day_fields = dict(day_fields or {})
-                raw_at = day_fields.get("at", "")
                 zone = day["timezone"] if day else DEFAULT_ZONE
-                if raw_at:
-                    day_fields["at"] = convert_zone(
-                        simple_instant(raw_at, now, today_only=True), zone
-                    )
                 day_fields["timezone"] = zone
             if action != "day_cancel" and not self._automatic_enabled():
                 raise ValueError("wake_disabled")
@@ -670,6 +671,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
                 now,
                 action,
                 preserve_minute=partial,
+                simple=simple_day,
                 **(day_fields or {}),
             )
             store.write(data)
@@ -733,7 +735,7 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
             if action == "add":
                 row = None
                 if item_id or version:
-                    raise ValueError("invalid_management_request")
+                    raise ValueError("add_identity_not_allowed")
             partial = action == "update"
             if simple and at:
                 at, zone = simple_instant(at, now), DEFAULT_ZONE

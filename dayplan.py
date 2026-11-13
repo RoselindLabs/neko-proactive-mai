@@ -6,6 +6,7 @@ import json
 import re
 
 from .repeat import zone_info, occurrence
+from .time_input import DEFAULT_ZONE, convert_zone, simple_instant
 from .wake_store import PENDING, number, parse_appointment, text, valid_record
 
 MAX_ITEMS = 6
@@ -197,6 +198,7 @@ def change_day(
     item_id="",
     version="",
     preserve_minute=False,
+    simple=False,
 ):
     if any(
         not text(value, limit, empty=True)
@@ -214,6 +216,10 @@ def change_day(
     if plan and today < plan["date"]:
         raise ValueError("day_clock_reversed")
     if action == "day_add":
+        if item_id or version:
+            raise ValueError("add_identity_not_allowed")
+        if simple and at:
+            at = convert_zone(simple_instant(at, now, today_only=True), zone)
         due, normalized = parse_appointment(at, zone, intent, now)
         if day_key(due, zone) != today:
             raise ValueError("day_time_outside_today")
@@ -258,6 +264,15 @@ def change_day(
     if action == "day_cancel":
         row.update(status="cancelled", block="")
         return row
+    if simple and at:
+        # The page prefills only the Beijing minute. Validate the actual item
+        # and CAS first; keeping that minute must retain its original seconds.
+        if preserve_minute and at == datetime.fromtimestamp(
+            row["due"], zone_info(DEFAULT_ZONE)
+        ).strftime("%H:%M"):
+            at = ""
+        else:
+            at = convert_zone(simple_instant(at, now, today_only=True), zone)
     if preserve_minute and at:
         moment = datetime.fromisoformat(at)
         if moment.utcoffset() is not None and int(moment.timestamp() // 60) == int(
