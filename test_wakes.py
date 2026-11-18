@@ -420,8 +420,10 @@ class WakeTests(unittest.IsolatedAsyncioTestCase):
     async def test_real_sdk_schema_contains_no_target_or_trust_argument(self):
         component = next(c for c in self.bot.get_components() if c["name"] == "neko_proactive_wake")
         self.assertEqual(component["metadata"]["trusted_context"], CONTRACT)
-        self.assertEqual(component["metadata"]["chat_scope"], "private")
-        self.assertEqual(component["metadata"]["platforms"], ["qq", "telegram"])
+        # SDK 2.23 exposes scope at the top level; earlier SDKs use metadata.
+        scope = component["metadata"] | component
+        self.assertEqual(scope["chat_scope"], "private")
+        self.assertCountEqual(scope["platforms"], ["qq", "telegram"])
         self.assertEqual(
             {p["name"] for p in component["metadata"]["parameters"]},
             {"action", "at", "intent", "item_id", "version"},

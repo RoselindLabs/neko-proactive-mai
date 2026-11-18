@@ -53,7 +53,7 @@ def main():
         spec.loader.exec_module(module)
         plugin = module.create_plugin()
         assert plugin.config_model is module.LonelyMaiConfig
-        names = {component["name"] for component in plugin.get_components()}
+        components = {component["name"]: component for component in plugin.get_components()}
         assert {
             "lonelymai_trigger",
             "lonelymai_latest_planner_task",
@@ -66,7 +66,17 @@ def main():
             "wake_overview",
             "wake_save",
             "wake_cancel",
-        } <= names
+        } <= components.keys()
+        for name, platforms in (
+            ("neko_proactive_wake", ["qq", "telegram"]),
+            ("neko_proactive_repeat", ["qq", "telegram"]),
+            ("neko_proactive_dayplan", ["qq"]),
+        ):
+            tool = components[name]
+            scope = tool["metadata"] | tool
+            assert tool["type"] == "TOOL"
+            assert tool["metadata"]["trusted_context"] == "neko.tools.context.v1"
+            assert scope["chat_scope"] == "private" and sorted(scope["platforms"]) == platforms
         assert not (extracted / "config.toml").exists()
         declaration = json.loads((extracted / "webui.json").read_text(encoding="utf-8"))
         assert declaration["pages"][0]["entry"] == "webui.html"

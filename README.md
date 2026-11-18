@@ -301,7 +301,7 @@ python scripts/check_archive.py
 本地有维护Host源码与依赖环境时，可额外运行`python scripts/verify_host_plans.py --host-source <MaiBot源码> --temp-dir <隔离临时目录> --report <报告路径>`。该脚本禁止网络，在临时实例中通过真实SDK注册、Host普通/Focus上下文与参数信封、实际deferred字符串检索、计划存储和调度链核验；只替换底层RPC，不调用模型或QQ/TG。`--legacy-ref f065ed5`额外核验实际2.9.4读取器可读v4、拒读v5且账本不变（需本仓该历史提交）。
 
 测试使用真实SDK及Mock Host/Life、合成时钟和独立持久目录，不接触线上配置/服务；`test_wakes`覆盖预约授权、时区、规则阻挡、重启/崩溃窗口、并发、损坏保护和临时上下文。
-日常源码CI保留Linux生产Python3.14.4/SDK2.16.0及Windows最低Python3.12/SDK2.12两组，完整自有测试、依赖检查、lint与最终源码包真实SDK导入仍跑。按关键意图/桥/生命周期/上下文测试组非空及实际成功守门，不用固定总用例数。原8组完整兼容矩阵保留在v标签、手动full及有源码变化的夜间验证，另保留固定生产组合，不把latest当线上。
+日常源码CI固定 Ubuntu 24.04 / Python 3.14.4 / SDK 2.23.0 以及 Windows 最低 Python 3.12 / SDK 2.12.0 两组，完整自有测试、依赖检查、lint与最终源码包真实SDK导入仍跑。按关键意图/桥/生命周期/上下文测试组非空及实际成功守门，不用固定总用例数。原8组完整兼容矩阵保留在v标签、手动full及有源码变化的夜间验证，另保留固定生产组合，不把latest当线上。
 
 纯根目录/docs下Markdown只检查本地文档，不能获得源码发布资格。`ci-gate`核对预期任务，`publish-gate`仅main的源码push或受控手动同SHA核心验证可成功；取消、失败、意外skip和旧提交不算通过。CI不自动部署，不发模型/QQ；如果要发布文档-only HEAD，手动运行同HEAD核心验证即可，不做空提交。
 Actions固定为GitHub API核实的提交SHA。仓库没有发布器；归档烟测仅在临时目录构建/解压源码zip，检查manifest与真实SDK插件工厂加载，排除config.toml、密钥、outbox，不新建发布/部署流水线。
