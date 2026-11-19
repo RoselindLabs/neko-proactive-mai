@@ -239,17 +239,13 @@ def tool_result(kind, result, *, selected=None):
         "expired": "expired=已错过、不补播",
         "revoked": "revoked=授权/会话失效",
     }
-    guidance = "这是计划状态，不是消息送达凭证；到时可沉默。"
     relevant = [meaning for status, meaning in meanings.items() if status in statuses]
-    if relevant:
-        guidance += " " + "；".join(relevant) + "。"
     return {
         **result,
         "content": result["message"]
         + "\n"
         + json.dumps(view, ensure_ascii=False)
-        + "\n"
-        + guidance,
+        + ("\n" + "；".join(relevant) + "。" if relevant else ""),
     }
 
 

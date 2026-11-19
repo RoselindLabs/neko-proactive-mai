@@ -336,8 +336,9 @@ class RepeatTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 metadata["description"], metadata.get("brief_description", metadata["description"])
             )
-            self.assertIn("get", metadata["description"])
-            self.assertNotIn("target", {p["name"] for p in metadata["parameters"]})
+            parameters = {p["name"]: p for p in metadata["parameters"]}
+            self.assertIn("get", parameters["action"]["description"])
+            self.assertNotIn("target", parameters)
         self.assertIn("每隔N天", components["neko_proactive_repeat"]["metadata"]["description"])
 
     async def test_repeat_hot_config_scheduler_replacement_keeps_plan_unload_cancels_unknown(self):

@@ -237,12 +237,11 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
 
     @Tool(
         "neko_proactive_wake",
-        description="单次预约/定时提醒：在当前授权私聊稍后续聊或回顾，可保留多条；每天或每隔N天用neko_proactive_repeat。已有安排先get，再按item_id/version修改或取消，不要每轮新增。到时可沉默，不是可靠闹钟；unknown不可为补发重加。",
-        brief_description="单次预约/定时提醒：在当前授权私聊稍后续聊或回顾，可保留多条；每天或每隔N天用neko_proactive_repeat。已有安排先get，再按item_id/version修改或取消，不要每轮新增。到时可沉默，不是可靠闹钟；unknown不可为补发重加。",
+        description="在当前授权私聊预约一次定时唤醒。",
         parameters=[
             ToolParameterInfo(
                 name="action",
-                description="get查看；add新增且不覆盖其他预约，必填at和intent；update仅修改未来未尝试项；cancel仅取消待执行项",
+                description="已有预约先用get查看；add新增一条，必填at和intent，不覆盖其他预约；update仅修改未来未尝试项；cancel仅取消待执行项",
                 enum_values=["get", "add", "update", "cancel"],
             ),
             ToolParameterInfo(
@@ -340,23 +339,22 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
 
     @Tool(
         "neko_proactive_repeat",
-        description="重复预约/计划提醒：每天、每隔N天或固定间隔续聊/回顾；一次性用neko_proactive_wake。当前授权私聊只保留一份重复计划，不支持指定星期或每月。已有计划先get再修改，不必每轮设置。到时可沉默，不是可靠闹钟；unknown不可为补发重加。",
-        brief_description="重复预约/计划提醒：每天、每隔N天或固定间隔续聊/回顾；一次性用neko_proactive_wake。当前授权私聊只保留一份重复计划，不支持指定星期或每月。已有计划先get再修改，不必每轮设置。到时可沉默，不是可靠闹钟；unknown不可为补发重加。",
+        description="重复预约：在当前授权私聊每天定时或按固定间隔（如每隔N天）唤醒麦麦。",
         parameters=[
             ToolParameterInfo(
                 name="action",
-                description="get查看；set设置/修改，首次必填intent及interval_minutes或local_time二选一，修改时省略字段保留，编辑暂停计划不自动resume；pause暂停；resume继续；delete删除",
+                description="每个私聊只有一份重复计划，已有计划先用get查看；set设置或修改，省略字段保留，暂停状态不变；pause暂停；resume继续；delete删除",
                 enum_values=["get", "set", "pause", "resume", "delete"],
             ),
             ToolParameterInfo(
                 name="interval_minutes",
-                description="间隔1～10080分钟：每5分钟填5，每2小时填120，每隔2天填2880",
+                description="固定间隔1～10080分钟：每5分钟填5，每2小时填120，每隔2天填2880；首次set与local_time二选一",
                 param_type=ToolParamType.INTEGER,
                 required=False,
             ),
             ToolParameterInfo(
                 name="local_time",
-                description="每天北京时间HH:MM，例如21:00；与interval_minutes二选一",
+                description="每天北京时间HH:MM，例如21:00；不支持指定星期或每月。首次set与interval_minutes二选一，不能同时填",
                 required=False,
             ),
             ToolParameterInfo(
@@ -500,16 +498,16 @@ class LonelyMaiPlugin(WakeManagement, MaiBotPlugin):
 
     @Tool(
         "neko_proactive_dayplan",
-        brief_description="今天日程/计划提醒：安排今天稍后整理、关注或继续的话题，不能设置明天或以后。最多6项，可留空；计划不代表已发生经历。已有安排先get，再按item_id/version修改或取消，不要每轮新增。到时可沉默，不是可靠闹钟；unknown不可为补发重加。",
+        description="在当前授权的QQ私聊安排今天稍后要关注的话题或事项。",
         parameters=[
             ToolParameterInfo(
                 name="action",
-                description="get查看；add添加，必填at和intent；update修改、cancel取消，均仅限未来未尝试项",
+                description="已有日程先用get查看；add新增，必填at和intent，每天最多6项；update修改、cancel取消，均仅限未来未尝试项",
                 enum_values=["get", "add", "update", "cancel"],
             ),
             ToolParameterInfo(
                 name="at",
-                description="今天北京时间HH:MM，如21:30；至少1分钟后，过时不顺延。add必填，update省略保留",
+                description="今天北京时间HH:MM，如21:30；至少1分钟后，过时不顺延，不能设置明天或以后。add必填，update省略保留",
                 required=False,
             ),
             ToolParameterInfo(

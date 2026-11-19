@@ -67,7 +67,9 @@ async def verify(host, legacy_ref):
                             for name, entry in entries.items()
                         }
                         search_runtime = SimpleNamespace(
-                            deferred_tool_specs_by_name=specs, discovered_tool_names=set()
+                            deferred_tool_specs_by_name=specs,
+                            discovered_tool_names=set(),
+                            _tool_search_tail_loading=False,
                         )
                         for query in ("预约", "重复预约", "每天", "每隔N天"):
                             found = MaisakaHeartFlowChatting.search_deferred_tool_specs(
@@ -83,7 +85,11 @@ async def verify(host, legacy_ref):
                         reminder = MaisakaHeartFlowChatting.build_deferred_tools_reminder(
                             search_runtime
                         )
-                        assert "每隔N天" in reminder and "2880" in reminder
+                        assert "每隔N天" in reminder and "2880" not in reminder
+                        interval = specs["neko_proactive_repeat"].parameters_schema["properties"][
+                            "interval_minutes"
+                        ]
+                        assert "2880" in interval["description"]
                         session = "qq-123" if platform == "qq" else "tg-123"
                         runtime = SimpleNamespace(
                             session_id=session,

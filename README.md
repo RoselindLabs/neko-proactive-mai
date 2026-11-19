@@ -2,6 +2,10 @@
 
 MaiBot 主动聊天调度插件，插件 ID 为 `neko.proactive`。
 
+## 2.10.5 · 计划工具目录
+
+模型在工具目录中看到的每项说明缩为一句：`wake` 在授权私聊预约一次定时唤醒，`repeat` 每天定时或按固定间隔唤醒，`dayplan` 在授权 QQ 私聊安排今天稍后要关注的话题或事项。时间范围、操作和条目版本见对应参数；结果只解释本次出现的状态，`unknown` 不能视为未发送或据此重加。到点仍由麦麦结合当时的聊天自行判断。
+
 ## 2.10.4 · 计划状态与结果文案修复
 
 - 已撤权重复计划拒绝暂停，避免保存`paused`与当前轮`revoked`的不合法组合；恢复名单不复活旧计划，不自动修写已有异常账本。
@@ -15,7 +19,9 @@ MaiBot 主动聊天调度插件，插件 ID 为 `neko.proactive`。
 
 ## 2.10.3 · 计划工具业务结果可见性
 
-单次、重复和今天日程工具现在在SDK实际使用的`content`中返回有界业务投影：操作结果、计划时刻、状态、intent、item_id/version及下次时间；原有dict字段保持兼容。列表过多会明确标记截断并说明到管理页继续，不泄漏session/task/retry等内部字段。新增单次/日程必须同时填写北京时间`at`和`intent`；已有安排先get，更新省略字段保留，暂停计划编辑不会自动恢复。`submitted`仅表示Host入队，`unknown`不表示未发送且不触发补发；到时仍由Planner结合最新聊天决定是否开口，属于计划提示而非可靠闹钟。
+单次、重复和今天日程工具现在在SDK实际使用的`content`中返回有界业务投影：操作结果、计划时刻、状态、intent、item_id/version及下次时间；原有dict字段保持兼容。列表过多会明确标记截断并说明到管理页继续，不泄漏session/task/retry等内部字段。新增单次/日程必须同时填写北京时间`at`和`intent`；已有安排先get，更新省略字段保留，暂停计划编辑不会自动恢复。`submitted`仅表示Host入队，`unknown`不表示未发送且不触发补发。
+
+预约的动作是到点唤醒麦麦，由她结合当时的聊天决定是否开口。工具简介直接写「单次唤醒」或「周期唤醒」即可，不加「不保证发言」一类说明。
 
 ## 2.10.2 · B站阅读引用传递
 
@@ -114,7 +120,7 @@ B站0.10.0的独立感想和分享缘由作为本次聊天的可选素材，优�
 
 - `neko_proactive_wake(action="get"|"add"|"update"|"cancel", at?, intent?, item_id?, version?)`管理当前私聊多条单次预约，时间用简单北京时间；intent为1～240字依据，新增不覆盖其他条目，修改/取消带ID和当前版本。
 - `neko_proactive_repeat(action="get"|"set"|"pause"|"resume"|"delete", interval_minutes?, local_time?, intent?)`管理唯一重复计划。interval_minutes为1～10080整数分钟，或local_time为每天北京时间HH:MM；修改已有计划可省略沿用字段，只改意图不移动锚点。修改暂停计划不自动恢复，resume才继续。
-- 两个工具没有目标参数，只消费Host可信当前私聊上下文、当前名单及新鲜session。主说明写在SDK实际采用的`brief_description`/`description`链，不只放宿主不读取的detailed字段；deferred/tool_search与已发现工具Schema使用同一可见描述。内容仅说明“稍后具体话题用单次、持续联系用重复、可沉默、不必每次设、不保证提醒”，不加常驻system prompt、不改Planner/Replyer模板、宿主人设、群私意图。
+- 两个工具没有目标参数，只消费Host可信当前私聊上下文、当前名单及新鲜session。deferred/tool_search与已发现工具Schema使用SDK注册的同一主描述，现行目录文案见2.10.5；不加常驻system prompt、不改Planner/Replyer模板、宿主人设、群私意图。
 
 ### 调度与每轮持久边界
 
@@ -199,7 +205,7 @@ Life已退役时保持`life.enabled=false`，普通群私意图、概率、时�
 [plugin]
 enabled = false
 config_version = "2.0.0"
-version = "2.10.3"
+version = "2.10.5"
 
 [scheduler]
 enabled = true

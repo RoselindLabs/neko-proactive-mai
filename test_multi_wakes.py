@@ -314,5 +314,9 @@ class MultiManagementTests(unittest.IsolatedAsyncioTestCase):
                 "neko_proactive_dayplan",
             }:
                 copy_text = component["metadata"]["description"]
-                for internal in ("基础周期", "基础唤醒", "防重", "安全间距", "Host", "调度器"):
-                    self.assertNotIn(internal, copy_text)
+                self.assertEqual(copy_text.count("。"), 1)
+                for term in (
+                    "基础周期 基础唤醒 防重 安全间距 Host 调度器 "
+                    "get item_id version unknown 沉默 不保证 闹钟"
+                ).split():
+                    self.assertNotIn(term, copy_text)
